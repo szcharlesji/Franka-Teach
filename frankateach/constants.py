@@ -9,6 +9,19 @@ CONTROL_PORT = 8901
 COMMANDED_STATE_PORT = 8902
 RESKIN_STREAM_PORT = 12005
 
+# Bimanual port allocation. The right arm keeps the historical ports so the
+# single-arm VR teleop and data collection paths are unaffected; the left arm
+# is offset by 100 (state 9000, control 9001, commanded 9002).
+ARM_PORT_OFFSET = {"right": 0, "left": 100}
+
+
+def arm_ports(arm="right"):
+    """Return (control, state, commanded_state) ports for the given arm."""
+    if arm not in ARM_PORT_OFFSET:
+        raise ValueError(f"Unknown arm {arm!r}, expected one of {list(ARM_PORT_OFFSET)}")
+    offset = ARM_PORT_OFFSET[arm]
+    return CONTROL_PORT + offset, STATE_PORT + offset, COMMANDED_STATE_PORT + offset
+
 
 STATE_TOPIC = "state"
 CONTROL_TOPIC = "control"
@@ -41,3 +54,7 @@ CONTROL_FREQ = 20
 STATE_FREQ = 100
 CAM_FPS = 30
 DEPTH_PORT_OFFSET = 1000
+
+# Air hockey runs the control loop much faster than VR teleop. Kept separate so
+# raising it cannot regress the existing 20 Hz VR path.
+AIRHOCKEY_CONTROL_FREQ = 50

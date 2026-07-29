@@ -1,9 +1,16 @@
 from frankateach.franka_server import FrankaServer
 import hydra
 
+
 @hydra.main(version_base="1.2", config_path="configs", config_name="franka_server")
 def main(cfg):
-    fs = FrankaServer(cfg.deoxys_config_path)
+    fs = FrankaServer(
+        cfg.deoxys_config_path,
+        arm=cfg.arm,
+        control_freq=cfg.control_freq,
+        num_steps=cfg.num_steps,
+        start_joint_pos=cfg.start_joint_pos,
+    )
     fs.init_server()
 
 

@@ -2,6 +2,10 @@ defaults:
   - _self_
   - camera
 
+# Which arm's state stream to record (selects the ZMQ state ports).
+# For bimanual air hockey run one collector per arm, each with its OWN
+# storage_path -- two collectors sharing a directory overwrite each other.
+arm: right
 storage_path: "path/to/data/extracted_data/task_name"
 demo_num: 0
 collect_img: True

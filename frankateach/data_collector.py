@@ -15,12 +15,11 @@ from frankateach.sensors.reskin import ReskinSensorSubscriber
 from frankateach.utils import notify_component_start
 
 from frankateach.constants import (
-    COMMANDED_STATE_PORT,
     HOST,
     CAM_PORT,
-    STATE_PORT,
     DEPTH_PORT_OFFSET,
     RESKIN_STREAM_PORT,
+    arm_ports,
 )
 
 
@@ -35,7 +34,9 @@ class DataCollector:
         collect_state=False,
         collect_depth=False,
         collect_reskin=False,
+        arm="right",
     ):
+        self.arm = arm
         self.image_subscribers = {}
         self.depth_subscribers = {}
         if collect_img:
@@ -52,12 +53,12 @@ class DataCollector:
                     )
 
         if collect_state:
+            _, state_port, commanded_port = arm_ports(arm)
             self.state_socket = ZMQKeypointSubscriber(
-                host=HOST, port=STATE_PORT, topic="robot_state"
+                host=HOST, port=state_port, topic="robot_state"
             )
-            # self.state_socket = create_response_socket(HOST, STATE_PORT)
             self.commanded_state_socket = ZMQKeypointSubscriber(
-                host=HOST, port=COMMANDED_STATE_PORT, topic="commanded_robot_state"
+                host=HOST, port=commanded_port, topic="commanded_robot_state"
             )
 
         if collect_reskin:
@@ -66,7 +67,10 @@ class DataCollector:
         # Create the storage directory
         self.storage_path = Path(storage_path) / f"demonstration_{demo_num}"
         self.storage_path.mkdir(parents=True, exist_ok=True)
-        print("Storage path: ", self.storage_path)
+        print(f"Collecting {arm!r} arm -> {self.storage_path}")
+        # Two collectors running at once must not share a directory, or they
+        # will overwrite each other's states.pkl. Give each arm its own
+        # storage_path in configs/collect_data.yaml.
 
         self.run_event = threading.Event()
         self.run_event.set()

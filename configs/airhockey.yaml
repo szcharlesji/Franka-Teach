@@ -1,0 +1,47 @@
+# Air hockey teleop. The `arms.*` geometry blocks below are written by
+#   python3 airhockey.py --calibrate --arm <right|left>
+# and are safe to hand-tune afterwards.
+
+control_hz: 50        # per-arm command rate; see scripts/rate_test.py first
+speed: 0.35           # m/s at full key deflection
+accel_time: 0.08      # s to reach full speed, and to come to a stop
+max_lead: 0.05        # m — how far the commanded target may outrun the real EE
+home_speed: 0.15      # m/s when gliding back to the box centre on H
+margin: 0.015         # m — shrink in from the taught corners on every side
+watchdog: 0.1         # s — freeze an arm if input intent goes this stale
+plane_mode: constant  # constant | tilted (tilted not implemented yet)
+
+# Calibration jog
+jog_speed: 0.08       # m/s while teaching corners
+jog_z_speed: 0.04     # m/s for Q/E height adjust
+trace_speed: 0.06     # m/s for the --verify perimeter trace
+
+# Display
+view_cam_id: 1        # realsense cam_id to show; null disables the video feed
+window: [1280, 720]
+
+arms:
+  right:
+    keys: arrows
+    deoxys_config: deoxys_right_fast.yml
+    ready_joints: null   # null -> server default
+    # --- written by --calibrate ---
+    center: null
+    yaw: 0.0
+    half_extents: null
+    plane_z: null
+    fixed_quat: null
+    corners: null
+    z_spread: 0.0
+  left:
+    keys: wasd
+    deoxys_config: deoxys_left_fast.yml
+    ready_joints: null
+    # --- written by --calibrate ---
+    center: null
+    yaw: 0.0
+    half_extents: null
+    plane_z: null
+    fixed_quat: null
+    corners: null
+    z_spread: 0.0

@@ -1,4 +1,16 @@
 defaults:
   - _self_
 
+# Which arm this server drives. Selects the ZMQ control port:
+#   right -> 8901 (historical default, unchanged)
+#   left  -> 9001
+arm: right
 deoxys_config_path: "deoxys_right.yml"
+
+# 20 for VR teleop. Air hockey uses control_freq=50 with num_steps=1 and a
+# deoxys config whose POLICY_RATE matches -- see configs/deoxys_*_fast.yml.
+control_freq: 20
+num_steps: 3
+
+# null -> DEFAULT_START_JOINT_POS in frankateach/franka_server.py
+start_joint_pos: null

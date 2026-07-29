@@ -16,19 +16,46 @@ from frankateach.utils import notify_component_start
 from frankateach.network import create_response_socket
 from frankateach.messages import FrankaAction, FrankaState
 from frankateach.constants import (
-    CONTROL_PORT,
     HOST,
     CONTROL_FREQ,
+    arm_ports,
 )
 
 CONFIG_ROOT = Path(__file__).parent / "configs"
 
+# Deoxys' default ready pose. Overridable per arm so each robot can be parked
+# facing its own half of the air hockey table.
+DEFAULT_START_JOINT_POS = [
+    0.09162008114028396,
+    -0.19826458111314524,
+    -0.01990020486871322,
+    -2.4732269941140346,
+    -0.01307073642274261,
+    2.30396583422025,
+    0.8480939705504309,
+]
+
 
 class FrankaServer:
-    def __init__(self, cfg):
-        self._robot = Robot(cfg, CONTROL_FREQ)
+    def __init__(
+        self,
+        cfg,
+        arm="right",
+        control_freq=CONTROL_FREQ,
+        num_steps=3,
+        start_joint_pos=None,
+    ):
+        self._robot = Robot(cfg, control_freq)
+        self.num_steps = num_steps
+        self.start_joint_pos = (
+            list(start_joint_pos)
+            if start_joint_pos is not None
+            else DEFAULT_START_JOINT_POS
+        )
+        control_port, _, _ = arm_ports(arm)
+        print(f"Franka server for {arm!r} arm listening on {HOST}:{control_port}")
         # Action REQ/REP
-        self.action_socket = create_response_socket(HOST, CONTROL_PORT)
+        self.action_socket = create_response_socket(HOST, control_port)
 
     def init_server(self):
         # connect to robot
@@ -60,13 +87,17 @@ class FrankaServer:
                 else:
                     franka_control: FrankaAction = pickle.loads(command)
                     if franka_control.reset:
-                        self._robot.reset_joints(gripper_open=franka_control.gripper)
+                        self._robot.reset_joints(
+                            gripper_open=franka_control.gripper,
+                            start_joint_pos=self.start_joint_pos,
+                        )
                         time.sleep(1)
                     else:
                         self._robot.osc_move(
                             franka_control.pos,
                             franka_control.quat,
                             franka_control.gripper,
+                            num_steps=self.num_steps,
                         )
                     self.action_socket.send(self.get_state())
         except KeyboardInterrupt:
@@ -98,9 +129,7 @@ class Robot(FrankaInterface):
 
         print("Franka is connected")
 
-    def osc_move(self, target_pos, target_quat, gripper_state):
-        num_steps = 3
-
+    def osc_move(self, target_pos, target_quat, gripper_state, num_steps=3):
         for _ in range(num_steps):
             target_mat = transform_utils.pose2mat(pose=(target_pos, target_quat))
 
@@ -134,16 +163,10 @@ class Robot(FrankaInterface):
         self,
         timeout=7,
         gripper_open=False,
+        start_joint_pos=None,
     ):
-        start_joint_pos = [
-            0.09162008114028396,
-            -0.19826458111314524,
-            -0.01990020486871322,
-            -2.4732269941140346,
-            -0.01307073642274261,
-            2.30396583422025,
-            0.8480939705504309,
-        ]
+        if start_joint_pos is None:
+            start_joint_pos = DEFAULT_START_JOINT_POS
         assert type(start_joint_pos) is list or type(start_joint_pos) is np.ndarray
         controller_cfg = get_default_controller_config(controller_type="JOINT_POSITION")
 

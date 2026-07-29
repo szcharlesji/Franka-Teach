@@ -13,6 +13,7 @@ def main(cfg):
         collect_depth=cfg.collect_depth,
         collect_state=cfg.collect_state,
         collect_reskin=cfg.collect_reskin,
+        arm=cfg.arm,
     )
     data_collector.start()
 

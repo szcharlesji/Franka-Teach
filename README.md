@@ -133,3 +133,103 @@ python3 collect_data.py demo_num=0 collect_depth=<True/False>
 ```
 
 4. For robot teleoperation, use the VR controllers to control the robot. When collecting human data, use the VR controller to start and stop the data collection while performing the actions with the human hand.
+
+## Air hockey (bimanual keyboard teleop)
+
+Both arms, keyboard-driven, each confined to a calibrated rectangle on a level
+plane at a fixed orientation. The gripper never moves — bolt or clamp the mallet
+on before you start.
+
+### Step 0 — confirm the arm can hold 50 Hz
+
+Everything below assumes a 50 Hz command round trip. Verify it before building on
+it. `POLICY_RATE` must match `control_freq` in **both** `frankateach/configs/deoxys_*_fast.yml`
+and the NUC-side `config/franka_*.yml`.
+
+```bash
+python3 franka_server.py arm=right deoxys_config_path=deoxys_right_fast.yml control_freq=50 num_steps=1
+python3 scripts/rate_test.py --arm right --hz 50
+```
+
+If the rate gate fails, lower `control_hz` in `configs/airhockey.yaml`; nothing
+else changes.
+
+### Step 1 — start one server per arm
+
+```bash
+python3 franka_server.py arm=right deoxys_config_path=deoxys_right_fast.yml control_freq=50 num_steps=1
+python3 franka_server.py arm=left  deoxys_config_path=deoxys_left_fast.yml  control_freq=50 num_steps=1
+python3 camera_server.py   # optional, for the video feed
+```
+
+Ports are arm-indexed: right uses 8900/8901/8902 (unchanged from the VR setup),
+left uses 9000/9001/9002.
+
+### Step 2 — calibrate each arm, mallet removed
+
+```bash
+python3 airhockey.py --calibrate --arm right
+python3 airhockey.py --calibrate --arm left
+```
+
+Jog with WASD (+ Q/E for height) and press SPACE at each of the **four corners**,
+going around the perimeter. The play area is then fitted as the largest rectangle
+that fits *inside* all four corners, minus `margin` — so it can never reach the
+edge you taught. Calibration warns if the four corner heights disagree by more
+than 5 mm, which means the table is not level in that arm's base frame.
+
+Then watch the real limits before trusting them:
+
+```bash
+python3 airhockey.py --verify --arm right
+```
+
+### Step 3 — play
+
+```bash
+python3 airhockey.py
+```
+
+| Key | Action |
+|---|---|
+| `WASD` | left arm (along the table, not the robot base axes) |
+| arrows | right arm |
+| `H` | glide both arms back to their box centres |
+| `SPACE` | freeze both arms |
+| `ESC` | release control (arms hold position) |
+| `Q` | quit, parking both arms |
+
+Arms start frozen; press a movement key to take control. Losing window focus
+freezes both arms, and each arm freezes itself if input goes stale for more than
+`watchdog` seconds. In every case the arm keeps holding its pose — it does not go
+limp.
+
+Tune feel in `configs/airhockey.yaml`: `speed`, `accel_time`, `max_lead`.
+Start with `speed: 0.1` and raise it once you trust the boxes.
+
+### Recording
+
+Each arm publishes `robot_state` and `commanded_robot_state` on its own ports, so
+`collect_data.py` records unchanged. Run one collector per arm, each with its own
+`storage_path` — two collectors sharing a directory will overwrite each other.
+
+```bash
+python3 collect_data.py arm=right storage_path=/data/airhockey_right demo_num=0
+python3 collect_data.py arm=left  storage_path=/data/airhockey_left  demo_num=0
+```
+
+### Tests
+
+Geometry and the control loop are covered without hardware (the loop runs against
+a fake server):
+
+```bash
+python3 tests/test_box.py
+python3 tests/test_teleop.py
+```
+
+### Safety
+
+Nothing in this stack does cross-arm collision checking. The only thing keeping
+the two arms apart is that their calibrated boxes are physically disjoint —
+verify that by hand.

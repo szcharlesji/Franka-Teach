@@ -9,7 +9,7 @@ from frankateach.constants import (
     GRIPPER_CLOSE,
     GRIPPER_OPEN,
     HOST,
-    CONTROL_PORT,
+    arm_ports,
 )
 from frankateach.messages import FrankaAction, FrankaState
 from frankateach.network import (
@@ -33,8 +33,10 @@ class FrankaEnv(gym.Env):
         use_robot=True,
         sensor_type=None,
         sensor_params=None,
+        arm="right",
     ):
         super(FrankaEnv, self).__init__()
+        self.arm = arm
         self.width = width
         self.height = height
         self.channels = 3
@@ -117,7 +119,8 @@ class FrankaEnv(gym.Env):
                 # Call once to populate initial baseline
                 self._get_reskin_state(update_baseline=True)
 
-            self.action_request_socket = create_request_socket(HOST, CONTROL_PORT)
+            control_port, _, _ = arm_ports(arm)
+            self.action_request_socket = create_request_socket(HOST, control_port)
 
     def get_state(self):
         self.action_request_socket.send(b"get_state")
