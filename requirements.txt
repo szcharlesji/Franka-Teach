@@ -6,5 +6,5 @@ hydra-core
 pyrealsense2
 h5py
 pre-commit
-pygame
+aiohttp
 pyyaml

@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Franka Air Hockey</title>
+<style>
+  :root {
+    --bg:#131317; --panel:#1c1c22; --line:#33333d; --fg:#e6e6ec; --dim:#8a8a99;
+    --good:#5fd68a; --warn:#ffc85a; --bad:#ff6b6b; --accent:#6cc2ff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 18px;
+           border-bottom:1px solid var(--line); }
+  h1 { font-size:15px; margin:0; letter-spacing:.5px; color:var(--accent); font-weight:600; }
+  #banner { margin-left:auto; font-weight:600; letter-spacing:.4px; }
+  .wrap { display:grid; grid-template-columns:300px 1fr 300px; gap:16px; padding:16px; }
+  @media (max-width:1000px){ .wrap{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { margin:0 0 10px; font-size:13px; letter-spacing:.6px; color:var(--accent); }
+  .keys { color:var(--dim); font-size:11px; margin-left:6px; }
+  canvas.box { width:100%; aspect-ratio:1/1.4; display:block; background:#0d0d11;
+               border:1px solid var(--line); border-radius:4px; }
+  .row { display:flex; justify-content:space-between; margin-top:8px; font-size:12px; }
+  .row span:first-child { color:var(--dim); }
+  .tag { padding:1px 7px; border-radius:3px; font-size:11px; font-weight:600; }
+  .t-live{background:rgba(95,214,138,.16);color:var(--good)}
+  .t-frozen{background:rgba(255,200,90,.16);color:var(--warn)}
+  .t-homing{background:rgba(108,194,255,.16);color:var(--accent)}
+  .t-dead{background:rgba(255,107,107,.16);color:var(--bad)}
+  #video { width:100%; border-radius:6px; border:1px solid var(--line);
+           background:#0d0d11; display:block; min-height:240px; }
+  #novideo { color:var(--dim); text-align:center; padding:60px 20px; font-size:12px; }
+  kbd { background:#26262f; border:1px solid var(--line); border-bottom-width:2px;
+        border-radius:3px; padding:1px 6px; font-size:11px; }
+  .help { color:var(--dim); font-size:12px; line-height:1.9; }
+  .warnbar { background:rgba(255,107,107,.12); border:1px solid var(--bad);
+             color:var(--bad); padding:8px 12px; border-radius:6px; margin:0 16px;
+             font-size:12px; display:none; white-space:pre-wrap; }
+  button { background:#26262f; color:var(--fg); border:1px solid var(--line);
+           border-radius:5px; padding:8px 14px; font:inherit; font-size:12px;
+           cursor:pointer; margin:3px 4px 3px 0; }
+  button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  button.primary { background:rgba(108,194,255,.15); border-color:var(--accent); color:var(--accent); }
+  ol.corners { list-style:none; padding:0; margin:10px 0; font-size:12px; }
+  ol.corners li { padding:5px 8px; border-radius:4px; margin-bottom:3px;
+                  background:#0d0d11; border:1px solid transparent; color:var(--dim); }
+  ol.corners li.done { color:var(--good); border-color:rgba(95,214,138,.3); }
+  ol.corners li.next { color:var(--warn); border-color:rgba(255,200,90,.4); }
+  table.sum { width:100%; font-size:12px; border-collapse:collapse; margin-top:8px; }
+  table.sum td { padding:3px 0; }
+  table.sum td:first-child { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>FRANKA AIR HOCKEY</h1>
+  <span id="conn" class="tag t-dead">CONNECTING</span>
+  <span id="rtt" style="color:var(--dim);font-size:12px"></span>
+  <span id="banner"></span>
+</header>
+<div id="warn" class="warnbar"></div>
+<div class="wrap">
+  <div class="panel" id="pane-left"></div>
+  <div class="panel">
+    <h2>TABLE VIEW</h2>
+    <img id="video" alt="camera">
+    <div id="novideo">no camera publishing — run camera_server.py</div>
+    <div class="help" style="margin-top:14px">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> and
+      <kbd>&uarr;</kbd><kbd>&larr;</kbd><kbd>&darr;</kbd><kbd>&rarr;</kbd> drive the arms &mdash;
+      along the <em>table</em> axes, not the robot base.<br>
+      <kbd>H</kbd> home both &nbsp; <kbd>Space</kbd> freeze &nbsp; <kbd>Esc</kbd> release<br>
+      Arms start frozen. Press a movement key to take control.<br>
+      Clicking away from this page freezes both arms.
+    </div>
+  </div>
+  <div class="panel" id="pane-right"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Full key-state protocol.
+// The page is on the far side of an SSH tunnel (~10 ms median, 29 ms p99, 43 ms
+// worst). Sending keydown/keyup EDGES would mean one lost "keyup" leaves an arm
+// driving into a wall. Instead we send the complete set of held keys 50x/sec;
+// the newest packet always wins, so any loss self-heals on the next tick. If the
+// stream stops, the server's 100 ms watchdog freezes the arms on its own.
+// ---------------------------------------------------------------------------
+const held = new Set();
+let frozen = true, released = true, homing = false;
+let cfg = null, ws = null, lastStatus = {}, rttMs = null;
+
+const $ = id => document.getElementById(id);
+
+function paneHTML(arm, keyname) {
+  return `<h2>${arm.toUpperCase()} ARM<span class="keys">${keyname}</span></h2>
+    <canvas class="box" id="cv-${arm}" width="300" height="420"></canvas>
+    <div class="row"><span>state</span><span class="tag t-dead" id="tag-${arm}">—</span></div>
+    <div class="row"><span>x / y</span><span id="pos-${arm}">—</span></div>
+    <div class="row"><span>speed</span><span id="spd-${arm}">—</span></div>
+    <div class="row"><span>loop</span><span id="rate-${arm}">—</span></div>
+    <div class="row"><span>box</span><span id="ext-${arm}">—</span></div>`;
+}
+
+function drawBox(arm, s) {
+  const cv = $('cv-' + arm); if (!cv) return;
+  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height, m = 26;
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = '#33333d'; ctx.lineWidth = 1;
+  ctx.strokeRect(m, m, W - 2 * m, H - 2 * m);
+  // box +x (up the table) -> up on screen; +y (left) -> left on screen
+  ctx.strokeStyle = '#26262f';
+  ctx.beginPath();
+  ctx.moveTo(W / 2, m); ctx.lineTo(W / 2, H - m);
+  ctx.moveTo(m, H / 2); ctx.lineTo(W - m, H / 2);
+  ctx.stroke();
+  if (!s || !s.connected) return;
+  const px = m + (W - 2 * m) * (0.5 - s.v / 2);
+  const py = m + (H - 2 * m) * (0.5 - s.u / 2);
+  ctx.fillStyle = s.stale ? '#ffc85a' : (s.homing ? '#6cc2ff' : '#5fd68a');
+  ctx.beginPath(); ctx.arc(px, py, 9, 0, 6.284); ctx.fill();
+  ctx.strokeStyle = '#0d0d11'; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function render() {
+  for (const arm of (cfg ? cfg.arms : [])) {
+    const s = lastStatus[arm];
+    drawBox(arm, s);
+    const tag = $('tag-' + arm); if (!tag || !s) continue;
+    let cls = 't-live', txt = 'LIVE';
+    if (!s.connected)   { cls = 't-dead';   txt = 'DEAD'; }
+    else if (s.homing)  { cls = 't-homing'; txt = 'HOMING'; }
+    else if (s.stale)   { cls = 't-frozen'; txt = 'FROZEN'; }
+    tag.className = 'tag ' + cls; tag.textContent = txt;
+    $('pos-' + arm).textContent = s.connected
+      ? `${s.pos[0].toFixed(3)}  ${s.pos[1].toFixed(3)}` : (s.error || '—');
+    $('spd-' + arm).textContent = `${s.speed.toFixed(2)} m/s`;
+    const rate = $('rate-' + arm);
+    rate.textContent = `${s.rate.toFixed(1)} Hz`;
+    rate.style.color = s.rate >= 45 ? 'var(--good)' : (s.rate >= 30 ? 'var(--warn)' : 'var(--bad)');
+    $('ext-' + arm).textContent =
+      `${(s.extents[0]*200).toFixed(0)}×${(s.extents[1]*200).toFixed(0)} cm  yaw ${s.yaw_deg}°`;
+  }
+  let b = '', col = 'var(--dim)';
+  if (!document.hasFocus())  { b = 'PAGE NOT FOCUSED — ARMS FROZEN'; col = 'var(--warn)'; }
+  else if (released)         { b = 'RELEASED — press a movement key'; col = 'var(--dim)'; }
+  else if (held.has('Space')){ b = 'FREEZE'; col = 'var(--warn)'; }
+  else if (homing)           { b = 'HOMING'; col = 'var(--accent)'; }
+  $('banner').textContent = b; $('banner').style.color = col;
+  $('rtt').textContent = rttMs === null ? '' : `link ${rttMs.toFixed(0)} ms`;
+  requestAnimationFrame(render);
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { $('conn').className = 'tag t-live'; $('conn').textContent = 'CONNECTED'; };
+  ws.onclose = () => {
+    $('conn').className = 'tag t-dead'; $('conn').textContent = 'DISCONNECTED';
+    released = true; held.clear();
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.t !== 'status') return;
+    if (cfg && cfg.mode === 'calibrate') calState = m;   // flat payload
+    else lastStatus = m.arms;                            // per-arm payload
+  };
+}
+
+function sendKeys() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const blur = !document.hasFocus();
+  if (blur) { held.clear(); homing = false; }
+  const t0 = performance.now();
+  ws.send(JSON.stringify({
+    t: 'keys',
+    held: Array.from(held),
+    frozen: released || blur || held.has('Space'),
+    home: homing && !released && !blur,
+  }));
+  // crude one-way estimate; good enough to spot a degrading link
+  rttMs = rttMs === null ? 0 : rttMs * 0.9 + (performance.now() - t0) * 0.1;
+}
+
+const MOVE_CODES = new Set();
+window.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  if (e.code === 'Escape') { released = true; homing = false; held.clear(); return; }
+  if (e.code === 'KeyH')   { homing = true; released = false; }
+  else if (MOVE_CODES.has(e.code)) { released = false; homing = false; }
+  held.add(e.code);
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+window.addEventListener('keyup', e => held.delete(e.code));
+// A tab switch or alt-tab must stop the arms, not leave the last key stuck.
+window.addEventListener('blur', () => { held.clear(); homing = false; });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { held.clear(); homing = false; }
+});
+
+// ---------------------------------------------------------------------------
+// Calibration mode
+// ---------------------------------------------------------------------------
+let calState = null;
+
+function calibratePanes(c) {
+  $('pane-left').innerHTML = `<h2>JOG — ${c.arm.toUpperCase()} ARM</h2>
+    <div class="help">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move in the plane<br>
+      <kbd>E</kbd> raise &nbsp; <kbd>Q</kbd> lower<br>
+      <kbd>Space</kbd> freeze<br><br>
+      Jog to each corner in order and press <b>Record</b>.
+      Go <em>around</em> the perimeter, not diagonally.
+    </div>
+    <div class="row"><span>state</span><span class="tag t-dead" id="cal-tag">—</span></div>
+    <div class="row"><span>x</span><span id="cal-x">—</span></div>
+    <div class="row"><span>y</span><span id="cal-y">—</span></div>
+    <div class="row"><span>z</span><span id="cal-z">—</span></div>
+    <div class="row"><span>loop</span><span id="cal-rate">—</span></div>`;
+  $('pane-right').innerHTML = `<h2>CORNERS</h2>
+    <ol class="corners" id="cal-list"></ol>
+    <button id="btn-record" class="primary">Record corner</button>
+    <button id="btn-undo">Undo</button>
+    <button id="btn-finish">Finish &amp; save</button>
+    <button id="btn-trace">Trace perimeter</button>
+    <div id="cal-msg" class="help" style="margin-top:10px"></div>
+    <div id="cal-sum"></div>`;
+  $('btn-record').onclick = () => sendCmd('record');
+  $('btn-undo').onclick   = () => sendCmd('undo');
+  $('btn-finish').onclick = () => sendCmd('finish');
+  $('btn-trace').onclick  = () => sendCmd('trace');
+}
+
+function sendCmd(cmd) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'cmd', cmd }));
+}
+
+function renderCalibrate() {
+  const s = calState;
+  if (s) {
+    const tag = $('cal-tag');
+    if (tag) {
+      let cls = 't-live', txt = 'JOG';
+      if (!s.connected)   { cls = 't-dead';   txt = 'DEAD'; }
+      else if (s.busy)    { cls = 't-homing'; txt = 'TRACING'; }
+      else if (s.stale)   { cls = 't-frozen'; txt = 'FROZEN'; }
+      tag.className = 'tag ' + cls; tag.textContent = txt;
+      $('cal-x').textContent = s.pos[0].toFixed(4);
+      $('cal-y').textContent = s.pos[1].toFixed(4);
+      $('cal-z').textContent = s.pos[2].toFixed(4);
+      const r = $('cal-rate'); r.textContent = `${s.rate.toFixed(1)} Hz`;
+      r.style.color = s.rate >= 45 ? 'var(--good)' : (s.rate >= 30 ? 'var(--warn)' : 'var(--bad)');
+      $('cal-list').innerHTML = cfg.corner_names.map((n, i) => {
+        const c = s.corners[i];
+        if (c) return `<li class="done">${i+1}. ${n}<br>&nbsp;&nbsp;&nbsp;${c[0].toFixed(4)}  ${c[1].toFixed(4)}  ${c[2].toFixed(4)}</li>`;
+        if (i === s.corners.length) return `<li class="next">${i+1}. ${n} &nbsp;← jog here</li>`;
+        return `<li>${i+1}. ${n}</li>`;
+      }).join('');
+      $('btn-record').disabled = s.corners.length >= 4 || s.busy;
+      $('btn-undo').disabled   = s.corners.length === 0 || s.busy;
+      $('btn-finish').disabled = s.corners.length !== 4 || s.busy;
+      $('btn-trace').disabled  = !s.done || s.busy;
+      $('cal-msg').textContent = s.message || '';
+      if (s.summary) {
+        const m = s.summary;
+        $('cal-sum').innerHTML = `<table class="sum">
+          <tr><td>centre</td><td>${m.center[0]}, ${m.center[1]}</td></tr>
+          <tr><td>yaw</td><td>${m.yaw_deg}°</td></tr>
+          <tr><td>play area</td><td>${m.play_area_m[0]} × ${m.play_area_m[1]} m</td></tr>
+          <tr><td>plane z</td><td>${m.plane_z}</td></tr>
+          <tr><td>corner spread</td><td>${m.z_spread_mm} mm</td></tr>
+          <tr><td>saved</td><td>${m.path.split('/').pop()}</td></tr></table>`;
+        const w = $('warn');
+        if (m.warnings && m.warnings.length) {
+          w.style.display = 'block'; w.textContent = m.warnings.join('\n\n');
+        } else w.style.display = 'none';
+      }
+    }
+  }
+  $('banner').textContent = document.hasFocus() ? '' : 'PAGE NOT FOCUSED — ARM FROZEN';
+  $('banner').style.color = 'var(--warn)';
+  requestAnimationFrame(renderCalibrate);
+}
+
+fetch('/config').then(r => r.json()).then(c => {
+  cfg = c;
+  const isCal = c.mode === 'calibrate';
+  for (const arm of c.arms) for (const code of Object.values(c.keys[arm])) MOVE_CODES.add(code);
+  if (isCal) { MOVE_CODES.add('KeyE'); MOVE_CODES.add('KeyQ'); }
+
+  if (isCal) {
+    document.querySelector('h1').textContent = `CALIBRATE — ${c.arm.toUpperCase()} ARM`;
+    $('video').style.display = 'none';
+    $('novideo').textContent = 'Jog the arm to each corner of the play area, then Record.';
+    calibratePanes(c);
+    connect();
+    setInterval(sendKeys, 20);
+    requestAnimationFrame(renderCalibrate);
+    return;
+  }
+
+  const panes = { left: 'pane-left', right: 'pane-right' };
+  for (const arm of c.arms) {
+    const el = $(panes[arm]); if (el) el.innerHTML = paneHTML(arm, c.keyset_names[arm]);
+  }
+  for (const arm of Object.keys(panes)) {
+    if (!c.arms.includes(arm)) $(panes[arm]).innerHTML =
+      `<h2>${arm.toUpperCase()} ARM</h2><div class="help">not in use</div>`;
+  }
+  if (c.has_camera) { $('video').src = '/video'; $('novideo').style.display = 'none'; }
+  else { $('video').style.display = 'none'; }
+  connect();
+  setInterval(sendKeys, 20);          // 50 Hz full-state snapshots
+  requestAnimationFrame(render);
+});
+
+$('video').addEventListener('error', () => {
+  $('video').style.display = 'none'; $('novideo').style.display = 'block';
+});
+</script>
+</body>
+</html>

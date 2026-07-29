@@ -1,23 +1,33 @@
-# Right arm, 50 Hz policy rate for air hockey teleop.
-# Identical to deoxys_right.yml except CONTROL.POLICY_RATE.
-# The NUC-side config/franka_right.yml must carry the SAME POLICY_RATE.
+# RIGHT arm, client side (the machine running franka_server.py).
+#
+# Values verified against the NUC's own config/franka_right.yml on 2026-07-29.
+# NOTE: deoxys_right.yml in this repo still carries the old lab's addressing
+# (172.16.0.4) which does not exist on this network.
+#
+#   NUC   192.168.100.201   RIGHT robot  192.168.100.203
+#
+# As of 2026-07-29 the right robot did NOT answer on 192.168.100.203 (ARP
+# incomplete) -- it appears powered off or off the network. Bring it up before
+# using this config.
 PC:
-  NAME: "lambda"
-  IP: 192.16.1.2
+  NAME: "nuc"
+  IP: 192.168.100.201
 
 NUC:
   NAME: "nuc"
-  IP: 192.16.1.3
+  IP: 192.168.100.201
   PUB_PORT: 5556
   SUB_PORT: 5555
   GRIPPER_PUB_PORT: 5558
   GRIPPER_SUB_PORT: 5557
 
 ROBOT:
-  IP: 172.16.0.4
+  IP: 192.168.100.203
 
 CONTROL:
-  STATE_PUBLISHER_RATE: 100
+  STATE_PUBLISHER_RATE: 120
+  # Must match control_freq passed to franka_server.py AND the POLICY_RATE in
+  # the NUC's config/franka_right.yml (currently 20 there -- raise it to 50).
   POLICY_RATE: 50
   TRAJ_RATE: 500
   ZMQ_NOBLOCK: true

@@ -1,42 +1,41 @@
-"""pygame keyboard -> per-arm movement intent.
+"""Key sets for air hockey teleop.
+
+Single source of truth for which physical keys drive which arm. Values are
+browser KeyboardEvent.code names, because the UI is a web page -- there is no
+pygame dependency anywhere in this project any more (the NUC has no monitor).
 
 Intent is expressed in BOX axes: +x is "up the table" (away from you), +y is
-left. box.rotate_intent() turns that into a base-frame velocity, so the keys
+left. PlayBox.rotate_intent() turns that into a base-frame velocity, so the keys
 feel the same regardless of how the arm is mounted relative to the table.
 """
 
-import pygame
-
 KEY_SETS = {
-    "wasd": {"up": pygame.K_w, "down": pygame.K_s, "left": pygame.K_a, "right": pygame.K_d},
+    "wasd": {"up": "KeyW", "down": "KeyS", "left": "KeyA", "right": "KeyD"},
     "arrows": {
-        "up": pygame.K_UP,
-        "down": pygame.K_DOWN,
-        "left": pygame.K_LEFT,
-        "right": pygame.K_RIGHT,
+        "up": "ArrowUp",
+        "down": "ArrowDown",
+        "left": "ArrowLeft",
+        "right": "ArrowRight",
     },
 }
 
 # Calibration jog only: raise/lower the EE to find the play height.
-JOG_UP = pygame.K_e
-JOG_DOWN = pygame.K_q
+JOG_UP = "KeyE"
+JOG_DOWN = "KeyQ"
 
-KEY_HOME = pygame.K_h
-KEY_FREEZE = pygame.K_SPACE
-KEY_RELEASE = pygame.K_ESCAPE
-KEY_RECORD = pygame.K_SPACE
-KEY_REDO = pygame.K_r
-KEY_DONE = pygame.K_RETURN
-
-
-def intent_from_keys(pressed, keys):
-    """(vx, vy) in {-1,0,1}^2 from a pygame key-state array."""
-    vx = float(pressed[keys["up"]]) - float(pressed[keys["down"]])
-    vy = float(pressed[keys["left"]]) - float(pressed[keys["right"]])
-    return vx, vy
+KEY_HOME = "KeyH"
+KEY_FREEZE = "Space"
+KEY_RELEASE = "Escape"
 
 
 def resolve_keys(name):
     if name not in KEY_SETS:
         raise ValueError(f"Unknown key set {name!r}, expected one of {list(KEY_SETS)}")
     return KEY_SETS[name]
+
+
+def intent_from_held(held, keys):
+    """(vx, vy) in {-1,0,1}^2 from a set of held KeyboardEvent.code strings."""
+    vx = float(keys["up"] in held) - float(keys["down"] in held)
+    vy = float(keys["left"] in held) - float(keys["right"] in held)
+    return vx, vy

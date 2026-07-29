@@ -1,23 +1,34 @@
-# Left arm, 50 Hz policy rate for air hockey teleop.
-# Identical to deoxys_left.yml except CONTROL.POLICY_RATE.
-# The NUC-side config/franka_left.yml must carry the SAME POLICY_RATE.
+# LEFT arm, client side (the machine running franka_server.py).
+#
+# Values verified against the NUC's own config/franka_left.yml on 2026-07-29.
+# NOTE: deoxys_left.yml in this repo still carries the old lab's addressing
+# (172.16.1.4 / ports 5565,5567) which does not exist on this network.
+#
+#   NUC   192.168.100.201   LEFT robot  192.168.100.202
+#
+# The Python side binds NUC.SUB_PORT on * and connects to NUC.IP:NUC.PUB_PORT,
+# so this file can be used from any host on 192.168.100.0/24. What decides
+# where the Python may run is PC.IP in the NUC's config/franka_left.yml --
+# franka-interface *connects* there for its command stream.
 PC:
-  NAME: "lambda"
-  IP: 192.16.1.2
+  NAME: "nuc"
+  IP: 192.168.100.201
 
 NUC:
   NAME: "nuc"
-  IP: 192.16.1.3
+  IP: 192.168.100.201
   PUB_PORT: 5566
-  SUB_PORT: 5565
+  SUB_PORT: 5575
   GRIPPER_PUB_PORT: 5568
-  GRIPPER_SUB_PORT: 5567
+  GRIPPER_SUB_PORT: 5577
 
 ROBOT:
-  IP: 172.16.1.4
+  IP: 192.168.100.202
 
 CONTROL:
-  STATE_PUBLISHER_RATE: 100
+  STATE_PUBLISHER_RATE: 120
+  # Must match control_freq passed to franka_server.py AND the POLICY_RATE in
+  # the NUC's config/franka_left.yml (already 120 there).
   POLICY_RATE: 50
   TRAJ_RATE: 500
   ZMQ_NOBLOCK: true
@@ -28,7 +39,7 @@ ARM_LOGGER:
     LEVEL: "info"
     USE: true
   FILE:
-    LOGGER_NAME: "logs/deoxys_control_arm_program.log"
+    LOGGER_NAME: "logs/deoxys_control_arm_program_left.log"
     LEVEL: "debug"
     USE: true
 
@@ -38,6 +49,6 @@ GRIPPER_LOGGER:
     LEVEL: "info"
     USE: true
   FILE:
-    LOGGER_NAME: "logs/deoxys_control_gripper_program.log"
+    LOGGER_NAME: "logs/deoxys_control_gripper_program_left.log"
     LEVEL: "debug"
     USE: true

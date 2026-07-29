@@ -1,9 +1,13 @@
-"""Per-arm 50 Hz control loop for air hockey teleop.
+"""Per-arm control loops for air hockey teleop.
 
-One ArmOperator per arm, each on its own thread with its own REQ socket, so a
-slow osc_move on one arm cannot stall the other. The pygame thread only ever
-writes an intent; everything safety-relevant (clip, leash, watchdog) lives in
-here so a hung or crashed input thread freezes the arm rather than running it.
+ArmOperator is the 50 Hz play loop, one per arm, each on its own thread with its
+own REQ socket so a slow osc_move on one arm cannot stall the other. JogOperator
+is the 3-DoF version used to teach the play box during calibration.
+
+The UI only ever writes an intent; everything safety-relevant (clip, leash,
+watchdog) lives in here, so a hung, crashed, or *disconnected* UI freezes the
+arm rather than running it. That matters more now that the UI is a web page on
+the far side of a network link than it did when it was a local pygame window.
 """
 
 import threading
@@ -58,7 +62,9 @@ class ArmOperator(threading.Thread):
         self.intent = ArmIntent(frozen=True)
         self.status = ArmStatus()
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        # NOT self._stop -- threading.Thread has an internal _stop() method that
+        # join() calls during teardown; shadowing it breaks every clean shutdown.
+        self._stop_event = threading.Event()
         self._ready = threading.Event()
         self.link = None
         self._state_pub = None
@@ -79,7 +85,7 @@ class ArmOperator(threading.Thread):
         return self._ready.wait(timeout)
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
 
     # -- control thread -----------------------------------------------------
     def run(self):
@@ -109,7 +115,7 @@ class ArmOperator(threading.Thread):
             # read off a HUD -- the instantaneous value swings by tens of Hz.
             mean_period = dt
 
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 with self._lock:
                     intent = self.intent
 
@@ -205,3 +211,133 @@ class ArmOperator(threading.Thread):
         except Exception:
             pass
         print(f"[{self.arm}] parked.")
+
+
+@dataclass
+class JogStatus:
+    pos: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    quat: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0]))
+    rate: float = 0.0
+    connected: bool = False
+    stale: bool = False
+    error: str = ""
+
+
+class JogOperator(threading.Thread):
+    """Free 3-DoF jogging for calibration.
+
+    Same intent seam and watchdog as ArmOperator, but no play box (there isn't
+    one yet -- that's what you're teaching) and a z axis so you can find the
+    play height. Only the global ROBOT_WORKSPACE clip in ArmLink.send_pose
+    bounds it, so jog slowly.
+    """
+
+    def __init__(self, arm, cfg):
+        super().__init__(daemon=True, name=f"jog-{arm}")
+        self.arm = arm
+        self.hz = float(cfg["control_hz"])
+        self.speed = float(cfg["jog_speed"])
+        self.z_speed = float(cfg["jog_z_speed"])
+        self.accel_time = float(cfg["accel_time"])
+        self.max_lead = float(cfg["max_lead"])
+        self.watchdog = float(cfg["watchdog"])
+
+        self.intent = ArmIntent(frozen=True)
+        self.vz = 0.0
+        self.status = JogStatus()
+        self._lock = threading.Lock()
+        # NOT self._stop -- shadows threading.Thread._stop(), breaking join().
+        self._stop_event = threading.Event()
+        self._ready = threading.Event()
+        self.link = None
+
+    def set_intent(self, vx, vy, vz=0.0, frozen=False):
+        with self._lock:
+            self.intent = ArmIntent(
+                vx=vx, vy=vy, stamp=time.perf_counter(), frozen=frozen
+            )
+            self.vz = vz
+
+    def get_status(self):
+        with self._lock:
+            return self.status
+
+    def wait_ready(self, timeout=90.0):
+        return self._ready.wait(timeout)
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        try:
+            self.link = ArmLink(self.arm)
+            print(f"[{self.arm}] resetting to ready pose for calibration...")
+            self.link.reset()
+            target = np.asarray(self.link.last_state.pos, dtype=np.float64).copy()
+            vel = np.zeros(3)
+            self._ready.set()
+            print(f"[{self.arm}] jog ready at {self.hz:.0f} Hz")
+
+            limiter = RateLimiter(self.hz)
+            dt = 1.0 / self.hz
+            last_tick = time.perf_counter()
+            mean_period = dt
+
+            while not self._stop_event.is_set():
+                with self._lock:
+                    intent, vz = self.intent, self.vz
+
+                stale = (time.perf_counter() - intent.stamp) > self.watchdog
+                if stale or intent.frozen:
+                    desired = np.zeros(3)
+                else:
+                    v = np.array([intent.vx, intent.vy], dtype=np.float64)
+                    mag = np.linalg.norm(v)
+                    if mag > 1.0:
+                        v /= mag
+                    desired = np.array(
+                        [v[0] * self.speed, v[1] * self.speed, vz * self.z_speed]
+                    )
+
+                vel = ramp(vel, desired, self.accel_time, dt, self.speed)
+                target = target + vel * dt
+
+                actual = np.asarray(self.link.last_state.pos, dtype=np.float64)
+                delta = target - actual
+                dist = np.linalg.norm(delta)
+                if dist > self.max_lead:
+                    target = actual + delta / dist * self.max_lead
+
+                state, _ = self.link.send_pose(target)
+
+                now = time.perf_counter()
+                measured = now - last_tick
+                last_tick = now
+                if measured > 0:
+                    mean_period += 0.05 * (measured - mean_period)
+                with self._lock:
+                    self.status = JogStatus(
+                        pos=np.asarray(state.pos, dtype=np.float64),
+                        quat=np.asarray(state.quat, dtype=np.float64),
+                        rate=1.0 / mean_period if mean_period > 0 else 0.0,
+                        connected=True,
+                        stale=stale or intent.frozen,
+                    )
+                limiter.sleep()
+        except Exception as exc:
+            with self._lock:
+                self.status = JogStatus(
+                    connected=False, error=f"{type(exc).__name__}: {exc}"
+                )
+            print(f"[{self.arm}] jog loop died: {type(exc).__name__}: {exc}")
+            self._ready.set()
+        finally:
+            try:
+                if self.link is not None and self.link.last_state is not None:
+                    pos = np.asarray(self.link.last_state.pos, dtype=np.float64)
+                    for _ in range(int(0.2 * self.hz)):
+                        self.link.send_pose(pos)
+                        time.sleep(1.0 / self.hz)
+            except Exception:
+                pass
+            print(f"[{self.arm}] jog stopped.")
