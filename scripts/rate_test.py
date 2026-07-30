@@ -22,6 +22,7 @@ import time
 
 import numpy as np
 
+from frankateach.airhockey.control import assert_sole_client
 from frankateach.constants import (
     GRIPPER_CLOSE,
     HOST,
@@ -77,6 +78,9 @@ def _glide_to(sock, target, quat, hz=50.0, speed=0.05, tol=0.003, timeout=20.0):
 
 
 def run(arm, hz, seconds, amplitude, period, do_reset, dz=0.0):
+    # A second client on the arm's REQ/REP port is served alternately with the
+    # first, so the measurement silently becomes a blend of both commanded poses.
+    assert_sole_client(arm)
     control_port, _, _ = arm_ports(arm)
     sock = create_request_socket(HOST, control_port)
     dt = 1.0 / hz

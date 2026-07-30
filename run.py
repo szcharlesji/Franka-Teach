@@ -99,9 +99,15 @@ def main():
             camera.stop()
         supervisor.stop()
 
-    # aiohttp installs its own handler once running; this covers the bring-up
-    # window, where a Ctrl-C would otherwise orphan franka-interface.
-    signal.signal(signal.SIGTERM, lambda *_: (shutdown(), sys.exit(0)))
+    # SIGTERM must behave like Ctrl-C. web.run_app installs its own signal
+    # handling once the loop is running, so a plain signal.signal() handler here
+    # gets replaced and `kill <pid>` leaves franka-interface, the servers and the
+    # camera all running. Raising KeyboardInterrupt instead lands in the same path
+    # aiohttp already unwinds cleanly, and our finally: shutdown() then runs.
+    def _sigterm(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm)
 
     try:
         supervisor.start()

@@ -1,65 +1,92 @@
-# Air hockey teleop. The `arms.*` geometry blocks below are written by the
-# calibrate mode in the web UI (`python3 run.py --calibrate <arm>`, or the
-# Calibrate button while playing) and are safe to hand-tune afterwards.
-#
-# NOTE: saving a calibration rewrites this whole file via yaml.safe_dump, which
-# drops comments. If these notes vanish again, that is why.
-
-control_hz: 50        # per-arm command rate; see scripts/rate_test.py first
-speed: 0.35           # m/s at full key deflection
-accel_time: 0.08      # s to reach full speed, and to come to a stop
-max_lead: 0.05        # m — how far the commanded target may outrun the real EE
-home_speed: 0.15      # m/s when gliding back to the box centre on H
-margin: 0.015         # m — shrink in from the taught corners on every side
-watchdog: 0.1         # s — freeze an arm if input intent goes this stale
-
-# constant: one height for the whole box, from the mean of the taught corners.
-# tilted:   follow the least-squares plane through the four corners' own z.
-# Only worth switching to tilted if the calibration summary reports a corner
-# spread you cannot shim away — a tilted plane cannot fix a *twisted* table.
+control_hz: 50
+speed: 0.35
+accel_time: 0.08
+max_lead: 0.05
+home_speed: 0.15
+margin: 0.015
+watchdog: 0.1
 plane_mode: constant
-
-# Snap the held EE orientation to exactly tool-down when saving a calibration,
-# keeping its yaw. Without this the wrist holds whatever angle it happened to be
-# at when you taught the corners, so a flat mallet face does not sit flat.
 level_wrist: true
-
-# Calibration jog
-jog_speed: 0.08       # m/s while teaching corners
-jog_z_speed: 0.04     # m/s for the raise/lower keys
-trace_speed: 0.06     # m/s for the perimeter trace
-
-# Display
-view_cam_id: 1        # realsense cam_id to show; null disables the video feed
-window: [1280, 720]
-
+plane_offset: 0.01
+jog_speed: 0.08
+jog_z_speed: 0.04
+trace_speed: 0.06
+view_cam_id: 1
+window:
+- 1280
+- 720
 arms:
   right:
     keys: ijkl
     deoxys_config: deoxys_right_fast.yml
-    ready_joints: null   # null -> server default
-    # --- written by calibration ---
-    center: null
-    yaw: 0.0
-    half_extents: null
-    plane_z: null
-    fixed_quat: null
-    corners: null
-    z_spread: 0.0
+    ready_joints: null
+    center:
+    - 0.4144412875175476
+    - -0.0008655451238155365
+    yaw: 0.016021929011275072
+    half_extents:
+    - 0.08875637488895577
+    - 0.148673922087885
+    plane_z: 0.30142969638109207
+    fixed_quat:
+    - 0.9586010457175967
+    - 0.2847525858515248
+    - 0.0
+    - 0.0
+    corners:
+    - - 0.306099534034729
+      - -0.1710463911294937
+      - 0.3011975884437561
+    - - 0.5208775997161865
+      - -0.16728685796260834
+      - 0.3035036027431488
+    - - 0.5249439477920532
+      - 0.17378176748752594
+      - 0.3032960593700409
+    - - 0.3058440685272217
+      - 0.16108930110931396
+      - 0.2977215349674225
+    z_spread: 0.005782067775726318
+    plane_mode: constant
+    plane_coeffs:
+    - 0.30142969638109207
+    - 0.01835487851542695
+    - -0.005808300787452794
+    plane_residual: 0.0008280284875031851
   left:
     keys: wasd
     deoxys_config: deoxys_left_fast.yml
     ready_joints: null
-    # --- written by calibration ---
-    center: [0.44219308346509933, -0.027719518169760704]
-    yaw: -0.013394710393221973
-    half_extents: [0.08765075143399534, 0.12623866112934745]
-    plane_z: 0.29016781598329544
-    fixed_quat: [0.9985955953598022, -0.0485997311770916, 0.008261836133897305,
-      0.019409775733947754]
+    center:
+    - 0.43577055633068085
+    - -0.04312939569354057
+    yaw: 0.013510006282355505
+    half_extents:
+    - 0.08660387958069456
+    - 0.16332547432745165
+    plane_z: 0.2478208877146244
+    fixed_quat:
+    - 0.9987507140800465
+    - -0.049970102307252955
+    - 0.0
+    - 0.0
     corners:
-    - [0.3376535475254059, -0.16803331673145294, 0.28732216358184814]
-    - [0.5479733943939209, -0.17415203154087067, 0.2913006544113159]
-    - [0.5486976504325867, 0.11210513114929199, 0.29270362854003906]
-    - [0.3344477415084839, 0.1192021444439888, 0.28934481739997864]
-    z_spread: 0.005381464958190918
+    - - 0.3348555266857147
+      - -0.22391170263290405
+      - 0.24308326840400696
+    - - 0.5398277640342712
+      - -0.2240254133939743
+      - 0.2488507479429245
+    - - 0.5416951775550842
+      - 0.1416807621717453
+      - 0.24907371401786804
+    - - 0.3267037570476532
+      - 0.13373877108097076
+      - 0.2502758204936981
+    z_spread: 0.007192552089691162
+    plane_mode: constant
+    plane_coeffs:
+    - 0.24782088771462435
+    - 0.010408205504847143
+    - 0.010093496007809207
+    plane_residual: 0.0018511525859919165

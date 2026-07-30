@@ -228,6 +228,11 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                 round(float(box.half_extents[1]) * 2, 3),
             ],
             "plane_z": round(float(box.plane_z), 4),
+            # What the arm will actually hold: the taught surface plus clearance.
+            "play_z": round(
+                float(box.plane_z) + float(cfg.get("plane_offset", 0.0)), 4
+            ),
+            "plane_offset_mm": round(float(cfg.get("plane_offset", 0.0)) * 1000, 1),
             "plane_mode": str(box.plane_mode),
             "tilt_mm_per_m": round(
                 float(np.linalg.norm(box.plane_coeffs[1:])) * 1000, 1

@@ -167,23 +167,52 @@ class ArmStack:
         ).start()
 
     def wait_for_server(self, timeout=90.0):
-        """Block until the control port is bound, or the server dies."""
+        """Block until the server answers get_state with a real pose.
+
+        Deliberately NOT a port check. FrankaServer binds its REP socket in
+        __init__, before init_server() waits for deoxys, so the port is up almost
+        immediately even when franka-interface is dead -- and an operator that
+        connects then blocks forever on its first request. Speaking the protocol
+        is the only honest readiness signal.
+        """
+        import pickle
+
+        import zmq
+
         deadline = time.perf_counter() + timeout
+        ctx = zmq.Context.instance()
         while time.perf_counter() < deadline:
-            if port_is_bound(self.control_port, HOST):
-                return True
             if self.server is not None and not self.server.alive:
                 raise RuntimeError(
                     f"{self.arm} franka_server exited with code "
-                    f"{self.server.returncode} before binding port "
-                    f"{self.control_port}. Its output is above -- the usual causes "
-                    "are FCI not enabled in Desk, or franka-interface pointed at a "
-                    "different PC.IP."
+                    f"{self.server.returncode}. Its output is above -- the usual "
+                    "causes are FCI not enabled in Desk, or franka-interface not "
+                    "running / pointed at a different PC.IP."
                 )
-            time.sleep(0.2)
+            # A fresh REQ socket per attempt: REQ is strict lockstep, so a socket
+            # that timed out mid-exchange cannot be reused.
+            sock = ctx.socket(zmq.REQ)
+            sock.setsockopt(zmq.LINGER, 0)
+            sock.setsockopt(zmq.RCVTIMEO, 1000)
+            try:
+                sock.connect(f"tcp://{HOST}:{self.control_port}")
+                sock.send(b"get_state")
+                reply = sock.recv()
+                if reply != b"state_error":
+                    pickle.loads(reply)
+                    return True
+            except zmq.ZMQError:
+                pass
+            except Exception:
+                pass
+            finally:
+                sock.close(0)
+            time.sleep(0.5)
         raise RuntimeError(
-            f"{self.arm} franka_server did not bind port {self.control_port} within "
-            f"{timeout:.0f}s. Check that franka-interface connected to this machine."
+            f"{self.arm} franka_server never returned a state within {timeout:.0f}s. "
+            "The port is bound but deoxys is not answering: check that "
+            f"franka-interface is running for the {self.arm} arm and that FCI is "
+            "enabled in Desk."
         )
 
     def stop(self):

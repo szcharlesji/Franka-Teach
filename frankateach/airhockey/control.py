@@ -4,6 +4,7 @@ import pickle
 import time
 
 import numpy as np
+import zmq
 
 from frankateach.constants import (
     GRIPPER_CLOSE,
@@ -14,6 +15,48 @@ from frankateach.constants import (
 )
 from frankateach.messages import FrankaAction, FrankaState
 from frankateach.network import create_request_socket
+
+
+def assert_sole_client(arm):
+    """Refuse to proceed if something else is already driving this arm.
+
+    FrankaServer is a synchronous REQ/REP loop, so a second client is not
+    rejected -- it is served, alternately with the first. The arm then sits
+    between the two commanded poses, and any measurement taken is a blend of the
+    two. That reads exactly like a controller fault: a run.py session holding
+    plane_z while a diagnostic commanded a different height produced a very
+    convincing -66 mm 'gravity sag' that was nothing of the sort.
+
+    Used by the diagnostic scripts. The live stack enforces the same rule
+    structurally, via ArmSession owning one operator at a time.
+
+    On loopback each connection appears twice in `ss` (both endpoints), so two
+    rows is one client.
+    """
+    import subprocess
+
+    port = arm_ports(arm)[0]
+    try:
+        out = subprocess.run(
+            ["ss", "-tnH", "state", "established"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        print(f"WARNING: could not check for other clients on port {port}.")
+        return
+    clients = sum(1 for line in out.splitlines() if f":{port}" in line) // 2
+    if clients:
+        raise SystemExit(
+            f"\nRefusing to run: {clients} client(s) already connected to the {arm} "
+            f"arm on port {port}.\n"
+            "run.py (or airhockey.py, or another script) is driving this arm. Both\n"
+            "would be served alternately and every measurement would be a blend of\n"
+            "the two commanded poses. Stop it first, then start a bare server:\n\n"
+            f"    python3 franka_server.py arm={arm} "
+            f"deoxys_config_path=deoxys_{arm}_fast.yml control_freq=50 num_steps=1\n"
+        )
 
 
 class RateLimiter:
@@ -80,17 +123,34 @@ class ArmLink:
     gripper -- the mallet is bolted on and never rotates.
     """
 
-    def __init__(self, arm, quat=None, gripper=GRIPPER_CLOSE):
+    def __init__(self, arm, quat=None, gripper=GRIPPER_CLOSE, timeout_ms=5000):
         self.arm = arm
         self.control_port, self.state_port, self.commanded_port = arm_ports(arm)
         self.socket = create_request_socket(HOST, self.control_port)
+        # Without this, a franka_server that is up but stuck in "Waiting for the
+        # robot to connect" (no franka-interface, or the robot latched in Reflex)
+        # leaves every caller blocked in recv() forever with no output at all.
+        # Fail loudly instead -- the REQ socket is unusable after a timeout anyway.
+        self.timeout_ms = int(timeout_ms)
+        self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         self.quat = None if quat is None else np.asarray(quat, dtype=np.float64)
         self.gripper = gripper
         self.last_state = None
 
+    def _recv(self):
+        try:
+            return self.socket.recv()
+        except zmq.Again as exc:
+            raise RuntimeError(
+                f"{self.arm} franka_server did not reply. Its port is bound but it "
+                "is not serving -- usually franka-interface is not running, or the "
+                "robot is latched in Reflex after hitting something. Check Desk for "
+                "an error to acknowledge, then restart franka-interface."
+            ) from exc
+
     def get_state(self) -> FrankaState:
         self.socket.send(b"get_state")
-        reply = self.socket.recv()
+        reply = self._recv()
         if reply == b"state_error":
             raise RuntimeError(f"{self.arm} arm returned state_error")
         self.last_state = pickle.loads(reply)
@@ -106,7 +166,13 @@ class ArmLink:
             timestamp=time.time(),
         )
         self.socket.send(pickle.dumps(action, protocol=-1))
-        self.last_state = pickle.loads(self.socket.recv())
+        # A joint reset is a real motion and FrankaServer.reset_joints allows
+        # itself 7 s, so the normal per-request timeout would fire spuriously.
+        self.socket.setsockopt(zmq.RCVTIMEO, max(self.timeout_ms, 30000))
+        try:
+            self.last_state = pickle.loads(self._recv())
+        finally:
+            self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         if self.quat is None:
             self.quat = np.asarray(self.last_state.quat, dtype=np.float64)
         return self.last_state
@@ -125,7 +191,7 @@ class ArmLink:
             timestamp=time.time(),
         )
         self.socket.send(pickle.dumps(action, protocol=-1))
-        self.last_state = pickle.loads(self.socket.recv())
+        self.last_state = pickle.loads(self._recv())
         return self.last_state, action
 
     def glide_to(self, target, speed=0.08, hz=50.0, tol=0.003, timeout=15.0):

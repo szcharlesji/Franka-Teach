@@ -28,7 +28,10 @@ def load_box(arm, path=CONFIG_PATH):
             f"The {arm!r} arm has no calibration in {path}. Run:\n"
             f"    python3 airhockey.py --calibrate --arm {arm}"
         )
-    return PlayBox.from_dict(arm_cfg)
+    box = PlayBox.from_dict(arm_cfg)
+    # Play height is a live setting, not saved geometry -- see PlayBox.plane_offset.
+    box.plane_offset = float(cfg.get("plane_offset", 0.0))
+    return box
 
 
 def save_box(arm, box: PlayBox, path=CONFIG_PATH):

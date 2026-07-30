@@ -37,6 +37,13 @@ class PlayBox:
     # has never been calibrated. Never written to the config; the UI shows it as a
     # warning and the launcher caps speed until it is replaced by a real one.
     provisional: bool = False
+    # Metres to play ABOVE the taught surface. Corners are taught by touching the
+    # table, so plane_z is the contact height -- playing there presses the tool
+    # into the table and trips a cartesian_reflex. Deliberately NOT serialised:
+    # it is a play setting, not geometry, so it lives in configs/airhockey.yaml
+    # and is applied by ahconfig.load_box. That way changing it takes effect
+    # without re-teaching, and it can never be double-applied from a saved box.
+    plane_offset: float = 0.0
 
     def __post_init__(self):
         self.center = np.asarray(self.center, dtype=np.float64).reshape(2)
@@ -98,6 +105,7 @@ class PlayBox:
             local = np.array([self.to_box(p) for p in pts])
             a, bx, by = self.plane_coeffs
             z = a + bx * local[:, 0] + by * local[:, 1]
+        z = z + self.plane_offset
         return float(z[0]) if single else z
 
     def contains(self, xy, tol=1e-9):
