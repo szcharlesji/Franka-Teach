@@ -72,6 +72,19 @@ The UI is a **browser page, not a desktop window**, because the deployment NUC h
 
 Note `tests/test_teleop.py` must `join()` each `FakeServer` before the next test binds the same port.
 
+**The tests cannot run while a real `franka_server.py` is up.** `FakeServer` binds
+the same arm-indexed ports, so a live server means the fake never comes up and the
+test client connects to the *real robot* instead — silently driving a live arm.
+`FakeServer.__init__` now probes the port and raises rather than letting that
+happen; do not weaken that check. Stop both servers before running the suite.
+
+Beware also that `FakeServer` answers in microseconds where a real arm takes
+~20 ms. Ordering bugs between a control thread and its caller can therefore pass
+every test and still fail on hardware — this is exactly how the `_ready` /
+`status.connected` race in both operators survived (`_ready.set()` fired before
+the first loop iteration published `connected=True`, so `serve_calibrate` printed
+a bare `ERROR:` against a healthy arm).
+
 ## Deployment reality (see RUNBOOK.md)
 
 - **The repo's `deoxys_left.yml` / `deoxys_right.yml` are stale** — they carry a previous lab's `172.16.x.x` addressing that does not exist on the current network. Use the `_fast.yml` pair, which was verified against the NUC's own configs.

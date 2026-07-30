@@ -22,12 +22,61 @@ import time
 
 import numpy as np
 
-from frankateach.constants import GRIPPER_CLOSE, HOST, arm_ports
+from frankateach.constants import (
+    GRIPPER_CLOSE,
+    HOST,
+    ROBOT_WORKSPACE_MAX,
+    ROBOT_WORKSPACE_MIN,
+    arm_ports,
+)
 from frankateach.messages import FrankaAction, FrankaState
 from frankateach.network import create_request_socket
 
 
-def run(arm, hz, seconds, amplitude, period, do_reset):
+def _send_pose(sock, pos, quat) -> FrankaState:
+    """One absolute-pose round trip. Returns the resulting state."""
+    sock.send(
+        pickle.dumps(
+            FrankaAction(
+                pos=np.asarray(pos, dtype=np.float32),
+                quat=np.asarray(quat, dtype=np.float32),
+                gripper=GRIPPER_CLOSE,
+                reset=False,
+                timestamp=time.time(),
+            ),
+            protocol=-1,
+        )
+    )
+    return pickle.loads(sock.recv())
+
+
+def _glide_to(sock, target, quat, hz=50.0, speed=0.05, tol=0.003, timeout=20.0):
+    """Straight line to `target` at a bounded speed.
+
+    Mirrors ArmLink.glide_to, reimplemented here because this script owns its own
+    REQ socket. Used to reach a raised sweep plane without a step command that
+    would make the arm lunge.
+    """
+    sock.send(b"get_state")
+    pos = np.array(pickle.loads(sock.recv()).pos, dtype=np.float64)
+    step = speed / hz
+    deadline = time.perf_counter() + timeout
+
+    while time.perf_counter() < deadline:
+        delta = target - pos
+        dist = np.linalg.norm(delta)
+        if dist < tol:
+            break
+        pos = pos + delta / dist * min(step, dist)
+        _send_pose(sock, pos, quat)
+        time.sleep(1.0 / hz)
+
+    for _ in range(int(0.2 * hz)):  # settle on the exact target
+        _send_pose(sock, target, quat)
+        time.sleep(1.0 / hz)
+
+
+def run(arm, hz, seconds, amplitude, period, do_reset, dz=0.0):
     control_port, _, _ = arm_ports(arm)
     sock = create_request_socket(HOST, control_port)
     dt = 1.0 / hz
@@ -54,6 +103,19 @@ def run(arm, hz, seconds, amplitude, period, do_reset):
         origin = np.array(state.pos, dtype=np.float64)
         quat = np.array(state.quat, dtype=np.float64)
         print(f"Origin pos={origin}, holding quat={quat}")
+
+        if dz:
+            raised = origin.copy()
+            raised[2] += dz
+            if not (ROBOT_WORKSPACE_MIN[2] <= raised[2] <= ROBOT_WORKSPACE_MAX[2]):
+                raise SystemExit(
+                    f"z={raised[2]:.3f} is outside the workspace "
+                    f"[{ROBOT_WORKSPACE_MIN[2]}, {ROBOT_WORKSPACE_MAX[2]}]"
+                )
+            print(f"Raising {dz * 100:+.1f} cm to z={raised[2]:.4f} before sweeping...")
+            _glide_to(sock, raised, quat, hz=hz)
+            origin = raised
+
         print(f"Sweeping +/-{amplitude * 100:.0f} cm in x, period {period}s\n")
 
         periods, errors = [], []
@@ -70,19 +132,7 @@ def run(arm, hz, seconds, amplitude, period, do_reset):
             target = origin.copy()
             target[0] += amplitude * np.sin(2 * np.pi * elapsed / period)
 
-            sock.send(
-                pickle.dumps(
-                    FrankaAction(
-                        pos=target.astype(np.float32),
-                        quat=quat.astype(np.float32),
-                        gripper=GRIPPER_CLOSE,
-                        reset=False,
-                        timestamp=time.time(),
-                    ),
-                    protocol=-1,
-                )
-            )
-            state = pickle.loads(sock.recv())
+            state = _send_pose(sock, target, quat)
 
             done = time.perf_counter()
             periods.append(done - last)
@@ -135,5 +185,12 @@ if __name__ == "__main__":
     p.add_argument("--amplitude", type=float, default=0.05, help="metres, half-stroke")
     p.add_argument("--period", type=float, default=4.0, help="seconds per sine cycle")
     p.add_argument("--no-reset", action="store_true", help="skip the joint reset")
+    p.add_argument(
+        "--dz",
+        type=float,
+        default=0.0,
+        help="metres to raise the sweep plane above the post-reset pose "
+        "(the reset pose sits low enough to graze a table)",
+    )
     a = p.parse_args()
-    run(a.arm, a.hz, a.seconds, a.amplitude, a.period, not a.no_reset)
+    run(a.arm, a.hz, a.seconds, a.amplitude, a.period, not a.no_reset, a.dz)

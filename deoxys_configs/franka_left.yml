@@ -1,0 +1,49 @@
+# LEFT arm, NUC side (franka-interface). See README.md in this directory.
+#
+#   this NUC  192.168.100.201      LEFT robot  192.168.100.202
+#
+# PC.IP is where franka-interface *connects* to for its command stream, i.e. the
+# only machine that may run franka_server.py for this arm. The shared config in
+# /home/robot-lab/work/deoxys_control still points at the Lambda (.83).
+PC:
+  NAME: "nuc"
+  IP: 192.168.100.201
+
+NUC:
+  NAME: "nuc"
+  IP: 192.168.100.201
+  PUB_PORT: 5566
+  SUB_PORT: 5575
+  GRIPPER_PUB_PORT: 5568
+  GRIPPER_SUB_PORT: 5577
+
+ROBOT:
+  IP: 192.168.100.202
+
+CONTROL:
+  STATE_PUBLISHER_RATE: 120
+  # Must match control_freq passed to franka_server.py and POLICY_RATE in
+  # frankateach/configs/deoxys_left_fast.yml. Air hockey runs at 50.
+  POLICY_RATE: 50
+  TRAJ_RATE: 500
+  ZMQ_NOBLOCK: true
+
+ARM_LOGGER:
+  CONSOLE:
+    LOGGER_NAME: "arm_logger"
+    LEVEL: "info"
+    USE: true
+  FILE:
+    LOGGER_NAME: "/home/robot-lab/charles/Franka-Teach/logs/deoxys_arm_left.log"
+    LEVEL: "debug"
+    USE: true
+
+GRIPPER_LOGGER:
+  CONSOLE:
+    LOGGER_NAME: "gripper_logger"
+    LEVEL: "info"
+    USE: true
+  FILE:
+    LOGGER_NAME: "/home/robot-lab/charles/Franka-Teach/logs/deoxys_gripper_left.log"
+    LEVEL: "debug"
+    USE: true

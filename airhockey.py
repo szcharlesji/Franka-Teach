@@ -42,6 +42,12 @@ def main():
     p.add_argument("--arms", default="right,left", help="arms to play with")
     p.add_argument("--port", type=int, default=8080, help="web UI port")
     p.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="with --calibrate: jog from the arm's current pose instead of the "
+        "ready pose, e.g. a height you set by hand-guiding in Desk",
+    )
+    p.add_argument(
         "--bind",
         default="127.0.0.1",
         help="bind address; keep the default and use an SSH tunnel",
@@ -59,7 +65,9 @@ def main():
         if not args.arm:
             p.error("--calibrate/--verify need --arm right|left")
         if args.calibrate:
-            return serve_calibrate(args.arm, cfg, port=args.port, bind=args.bind)
+            return serve_calibrate(
+                args.arm, cfg, port=args.port, bind=args.bind, reset=not args.no_reset
+            )
         box = ahconfig.load_box(args.arm)
         print(
             f"{args.arm} box: centre {box.center}, yaw {box.yaw:.4f} rad, "

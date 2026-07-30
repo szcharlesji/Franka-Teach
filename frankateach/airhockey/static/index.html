@@ -35,6 +35,8 @@
   kbd { background:#26262f; border:1px solid var(--line); border-bottom-width:2px;
         border-radius:3px; padding:1px 6px; font-size:11px; }
   .help { color:var(--dim); font-size:12px; line-height:1.9; }
+  .sup-arm { margin-right:14px; white-space:nowrap; }
+  .dim { color:var(--dim); }
   .warnbar { background:rgba(255,107,107,.12); border:1px solid var(--bad);
              color:var(--bad); padding:8px 12px; border-radius:6px; margin:0 16px;
              font-size:12px; display:none; white-space:pre-wrap; }
@@ -151,6 +153,7 @@ function render() {
   else if (homing)           { b = 'HOMING'; col = 'var(--accent)'; }
   $('banner').textContent = b; $('banner').style.color = col;
   $('rtt').textContent = rttMs === null ? '' : `link ${rttMs.toFixed(0)} ms`;
+  renderSupervisor();
   requestAnimationFrame(render);
 }
 
@@ -166,6 +169,15 @@ function connect() {
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.t !== 'status') return;
+    // Unified launcher: the server can move an arm between play and calibrate
+    // while we are connected. The two layouts differ enough that re-rendering in
+    // place would mean a third code path, so reload and let /config drive it.
+    if (cfg && cfg.unified && m.mode && m.mode !== cfg.mode) {
+      held.clear();
+      location.reload();
+      return;
+    }
+    if (m.supervisor) lastSupervisor = m.supervisor;
     if (cfg && cfg.mode === 'calibrate') calState = m;   // flat payload
     else lastStatus = m.arms;                            // per-arm payload
   };
@@ -206,12 +218,40 @@ document.addEventListener('visibilitychange', () => {
 // Calibration mode
 // ---------------------------------------------------------------------------
 let calState = null;
+let lastSupervisor = null;
+
+// Supervisor strip: whether each arm's franka-interface and franka_server are up.
+// Rendered here rather than in a terminal TUI because the NUC has no monitor, so
+// this page is the only surface you actually have in front of you.
+function renderSupervisor() {
+  const el = $('supervisor');
+  if (!el || !lastSupervisor) return;
+  el.innerHTML = Object.entries(lastSupervisor).map(([arm, s]) => {
+    const dot = ok => `<span class="tag ${ok ? 't-live' : 't-dead'}">${ok ? '●' : '○'}</span>`;
+    const iface = s.interface === 'up' || s.interface === 'external';
+    return `<span class="sup-arm"><b>${arm.toUpperCase()}</b>
+      iface ${dot(iface)} server ${dot(s.server === 'up' && s.port_bound)}
+      <span class="dim">:${s.port}</span></span>`;
+  }).join('');
+}
+
+// 'KeyW' -> 'W', 'ArrowUp' -> '↑', 'PageUp' -> 'PgUp'.
+const ARROW_GLYPH = {ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→'};
+function keyLabel(code) {
+  if (ARROW_GLYPH[code]) return ARROW_GLYPH[code];
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code === 'PageUp') return 'PgUp';
+  if (code === 'PageDown') return 'PgDn';
+  return code;
+}
 
 function calibratePanes(c) {
+  const k = c.keys[c.arm], z = c.jog_z_keys || {up: 'KeyE', down: 'KeyQ'};
+  const kbd = code => `<kbd>${keyLabel(code)}</kbd>`;
   $('pane-left').innerHTML = `<h2>JOG — ${c.arm.toUpperCase()} ARM</h2>
     <div class="help">
-      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move in the plane<br>
-      <kbd>E</kbd> raise &nbsp; <kbd>Q</kbd> lower<br>
+      ${kbd(k.up)}${kbd(k.left)}${kbd(k.down)}${kbd(k.right)} move in the plane<br>
+      ${kbd(z.up)} raise &nbsp; ${kbd(z.down)} lower<br>
       <kbd>Space</kbd> freeze<br><br>
       Jog to each corner in order and press <b>Record</b>.
       Go <em>around</em> the perimeter, not diagonally.
@@ -227,16 +267,25 @@ function calibratePanes(c) {
     <button id="btn-undo">Undo</button>
     <button id="btn-finish">Finish &amp; save</button>
     <button id="btn-trace">Trace perimeter</button>
+    <button id="btn-play">Back to play</button>
     <div id="cal-msg" class="help" style="margin-top:10px"></div>
     <div id="cal-sum"></div>`;
   $('btn-record').onclick = () => sendCmd('record');
   $('btn-undo').onclick   = () => sendCmd('undo');
   $('btn-finish').onclick = () => sendCmd('finish');
   $('btn-trace').onclick  = () => sendCmd('trace');
+  // Unified launcher only: hand the arm back to a play operator, reloading the
+  // box that was just saved. Absent when calibrate was launched standalone.
+  const play = $('btn-play');
+  if (play) {
+    if (c.unified) play.onclick = () => { held.clear(); sendCmd('play'); };
+    else play.style.display = 'none';
+  }
 }
 
-function sendCmd(cmd) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'cmd', cmd }));
+function sendCmd(cmd, extra) {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify(Object.assign({ t: 'cmd', cmd }, extra || {})));
 }
 
 function renderCalibrate() {
@@ -264,6 +313,7 @@ function renderCalibrate() {
       $('btn-undo').disabled   = s.corners.length === 0 || s.busy;
       $('btn-finish').disabled = s.corners.length !== 4 || s.busy;
       $('btn-trace').disabled  = !s.done || s.busy;
+      if ($('btn-play')) $('btn-play').disabled = s.busy;
       $('cal-msg').textContent = s.message || '';
       if (s.summary) {
         const m = s.summary;
@@ -290,7 +340,11 @@ fetch('/config').then(r => r.json()).then(c => {
   cfg = c;
   const isCal = c.mode === 'calibrate';
   for (const arm of c.arms) for (const code of Object.values(c.keys[arm])) MOVE_CODES.add(code);
-  if (isCal) { MOVE_CODES.add('KeyE'); MOVE_CODES.add('KeyQ'); }
+  // Jog raise/lower comes from the server so it matches the arm's key set.
+  if (isCal && c.jog_z_keys) {
+    MOVE_CODES.add(c.jog_z_keys.up);
+    MOVE_CODES.add(c.jog_z_keys.down);
+  }
 
   if (isCal) {
     document.querySelector('h1').textContent = `CALIBRATE — ${c.arm.toUpperCase()} ARM`;
@@ -313,6 +367,23 @@ fetch('/config').then(r => r.json()).then(c => {
   }
   if (c.has_camera) { $('video').src = '/video'; $('novideo').style.display = 'none'; }
   else { $('video').style.display = 'none'; }
+
+  // Unified launcher only: enter calibrate for an arm without restarting anything.
+  if (c.unified) {
+    const bar = document.createElement('div');
+    bar.className = 'help';
+    bar.style.margin = '8px 0';
+    bar.innerHTML = `<span id="supervisor"></span> `
+      + c.arms.map(a =>
+          `<button data-cal="${a}">Calibrate ${a}</button>`).join(' ');
+    document.querySelector('h1').after(bar);
+    for (const btn of bar.querySelectorAll('button[data-cal]')) {
+      btn.onclick = () => {
+        held.clear();
+        sendCmd('calibrate', { arm: btn.dataset.cal });
+      };
+    }
+  }
   connect();
   setInterval(sendKeys, 20);          // 50 Hz full-state snapshots
   requestAnimationFrame(render);

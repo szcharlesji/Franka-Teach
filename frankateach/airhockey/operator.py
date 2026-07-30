@@ -47,12 +47,18 @@ class ArmStatus:
 
 
 class ArmOperator(threading.Thread):
-    def __init__(self, arm, box, cfg, publish=True):
+    def __init__(self, arm, box, cfg, publish=True, speed=None, reset=True):
         super().__init__(daemon=True, name=f"arm-{arm}")
         self.arm = arm
         self.box = box
+        # reset=False holds the current pose instead of joint-resetting and gliding
+        # to the box centre. Used for a provisional box, which is anchored on the
+        # pose the arm is already in -- resetting would move an arm whose play area
+        # nobody has verified.
+        self.reset = reset
         self.hz = float(cfg["control_hz"])
-        self.speed = float(cfg["speed"])
+        # speed is overridable so the launcher can cap an uncalibrated arm.
+        self.speed = float(cfg["speed"] if speed is None else speed)
         self.accel_time = float(cfg["accel_time"])
         self.max_lead = float(cfg["max_lead"])
         self.watchdog = float(cfg["watchdog"])
@@ -95,16 +101,37 @@ class ArmOperator(threading.Thread):
                 self._state_pub = ZMQKeypointPublisher(HOST, self.link.state_port)
                 self._cmd_pub = ZMQKeypointPublisher(HOST, self.link.commanded_port)
 
-            print(f"[{self.arm}] resetting to ready pose...")
-            self.link.reset()
-            print(f"[{self.arm}] moving to box centre {self.box.home}...")
-            self.link.glide_to(self.box.home, speed=0.08, hz=self.hz)
+            if self.reset:
+                print(f"[{self.arm}] resetting to ready pose...")
+                self.link.reset()
+                print(f"[{self.arm}] moving to box centre {self.box.home}...")
+                self.link.glide_to(self.box.home, speed=0.08, hz=self.hz)
+            else:
+                state = self.link.get_state()
+                print(
+                    f"[{self.arm}] holding current pose "
+                    f"z={state.pos[2]:.4f} (no reset, no glide)"
+                )
 
             target = np.asarray(self.link.last_state.pos, dtype=np.float64).copy()
             target[:2] = self.box.clip(target[:2])
-            target[2] = self.box.plane_z
+            target[2] = self.box.z_at(target[:2])
             vel = np.zeros(2)
 
+            # Publish connected=True *before* signalling ready. connected is
+            # otherwise first set at the end of the first loop iteration, and
+            # callers that wait_ready() then immediately read the status win that
+            # race against a real arm's ~20 ms round trip (FakeServer answers in
+            # microseconds, which is why this only shows up on hardware).
+            with self._lock:
+                self.status = ArmStatus(
+                    pos=np.asarray(self.link.last_state.pos, dtype=np.float64),
+                    box_pos=self.box.clip(
+                        np.asarray(self.link.last_state.pos, dtype=np.float64)[:2]
+                    ),
+                    connected=True,
+                    stale=True,
+                )
             self._ready.set()
             print(f"[{self.arm}] live at {self.hz:.0f} Hz")
 
@@ -147,15 +174,17 @@ class ArmOperator(threading.Thread):
                     target[:2] = target[:2] + vel * dt
 
                 target[:2] = self.box.clip(target[:2])
-                target[2] = self.box.plane_z
 
                 # Leash: never let the command outrun where the arm actually is.
+                # Measured in the plane only. z is not ours to give away -- it is
+                # dictated by the play surface -- and letting a z sag count against
+                # the budget would tighten the xy leash for no reason.
                 actual = np.asarray(self.link.last_state.pos, dtype=np.float64)
-                delta = target - actual
-                dist = np.linalg.norm(delta)
-                if dist > self.max_lead:
-                    target = actual + delta / dist * self.max_lead
-                    target[2] = self.box.plane_z
+                delta_xy = target[:2] - actual[:2]
+                dist_xy = np.linalg.norm(delta_xy)
+                if dist_xy > self.max_lead:
+                    target[:2] = actual[:2] + delta_xy / dist_xy * self.max_lead
+                target[2] = self.box.z_at(target[:2])
 
                 state, action = self.link.send_pose(target)
 
@@ -232,9 +261,10 @@ class JogOperator(threading.Thread):
     bounds it, so jog slowly.
     """
 
-    def __init__(self, arm, cfg):
+    def __init__(self, arm, cfg, reset=True):
         super().__init__(daemon=True, name=f"jog-{arm}")
         self.arm = arm
+        self.reset = reset
         self.hz = float(cfg["control_hz"])
         self.speed = float(cfg["jog_speed"])
         self.z_speed = float(cfg["jog_z_speed"])
@@ -271,10 +301,33 @@ class JogOperator(threading.Thread):
     def run(self):
         try:
             self.link = ArmLink(self.arm)
-            print(f"[{self.arm}] resetting to ready pose for calibration...")
-            self.link.reset()
+            if self.reset:
+                print(f"[{self.arm}] resetting to ready pose for calibration...")
+                self.link.reset()
+            else:
+                # Jog from wherever the arm already is -- e.g. a height set by
+                # hand-guiding in Desk. The reset pose can sit low enough to
+                # graze the table, and Q/E only moves at jog_z_speed.
+                state = self.link.get_state()
+                # reset() is what normally latches the held orientation; without
+                # it ArmLink.quat stays None and send_pose would fail.
+                self.link.quat = np.asarray(state.quat, dtype=np.float64)
+                print(
+                    f"[{self.arm}] no reset; jogging from current pose "
+                    f"z={state.pos[2]:.4f}"
+                )
             target = np.asarray(self.link.last_state.pos, dtype=np.float64).copy()
             vel = np.zeros(3)
+            # See the matching comment in ArmOperator.run: connected must be
+            # visible before _ready fires, or serve_calibrate reports a bare
+            # "ERROR:" (connected False, error still "") on a healthy arm.
+            with self._lock:
+                self.status = JogStatus(
+                    pos=np.asarray(self.link.last_state.pos, dtype=np.float64),
+                    quat=np.asarray(self.link.last_state.quat, dtype=np.float64),
+                    connected=True,
+                    stale=True,
+                )
             self._ready.set()
             print(f"[{self.arm}] jog ready at {self.hz:.0f} Hz")
 
@@ -302,11 +355,18 @@ class JogOperator(threading.Thread):
                 vel = ramp(vel, desired, self.accel_time, dt, self.speed)
                 target = target + vel * dt
 
+                # Leash xy and z independently. A single 3-vector clip pulls the
+                # commanded height toward wherever the arm has sagged to, so lag in
+                # the plane made WASD wander in z -- which then got baked into the
+                # taught corner heights.
                 actual = np.asarray(self.link.last_state.pos, dtype=np.float64)
-                delta = target - actual
-                dist = np.linalg.norm(delta)
-                if dist > self.max_lead:
-                    target = actual + delta / dist * self.max_lead
+                delta_xy = target[:2] - actual[:2]
+                dist_xy = np.linalg.norm(delta_xy)
+                if dist_xy > self.max_lead:
+                    target[:2] = actual[:2] + delta_xy / dist_xy * self.max_lead
+                dz = target[2] - actual[2]
+                if abs(dz) > self.max_lead:
+                    target[2] = actual[2] + np.sign(dz) * self.max_lead
 
                 state, _ = self.link.send_pose(target)
 

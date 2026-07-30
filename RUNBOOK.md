@@ -1,230 +1,78 @@
-# Air hockey runbook — first robot bring-up
+# Air hockey runbook
 
-Everything below runs **on the NUC** (`ssh franka`) unless marked *laptop*.
-Nothing here has touched a real arm yet; this is the sequence to do that safely.
+Everything runs on the NUC (`robotlab-NUC8i7BEH`, 192.168.100.201) as `robot-lab`,
+from `~/charles/Franka-Teach`. Have the e-stop in hand.
 
-Have the e-stop in hand from Step 3 onward.
+## 1. Desk, per arm
 
-## Which user runs what
-
-`ssh franka` lands you on **`charles`**. That account owns the repo and the conda
-env, and can run everything from Step 2 onward.
-
-**Step 1 is the exception** — the deoxys config and its tmux session belong to
-`robot-lab`, and `charles` has neither write access nor passwordless sudo:
-
-| | Path | Owner |
-|---|---|---|
-| Repo | `/home/charles/Franka-Teach` | charles |
-| Conda env | `/home/charles/envs/franka_teach` | charles |
-| deoxys source + config | `/home/robot-lab/work/deoxys_control` | **robot-lab** |
-| miniforge (shared, read-only) | `/home/robot-lab/miniforge3` | robot-lab |
-
-So do Step 1 as `robot-lab` (`su - robot-lab`, or SSH in as that user), and
-everything after it as `charles`.
-
----
-
-## 0. Before you start
-
-- Mallet **off** the flange for Steps 3–5. Calibration jogs near the table.
-- Left arm brakes open + FCI enabled via Desk.
-- Know what's inside the arm's reach. The joint reset in Step 3 moves it without
-  asking.
-
-**Reach Desk from your laptop** — no FoxyProxy needed, Desk uses relative URLs:
+Tunnel from your laptop, then **include the `/desk/` path** — the redirect at `/`
+drops your port:
 
 ```bash
 ssh -L 8443:192.168.100.202:443 -L 8444:192.168.100.203:443 franka
 ```
 
-`https://localhost:8443` = left, `https://localhost:8444` = right. Click through
-the cert warning (`CN=robot.franka.de` never matches `localhost`). Only one Desk
-tab at a time — Franka's limitation, not ours.
+| | Desk | robot |
+|---|---|---|
+| left | `https://localhost:8443/desk/` | 192.168.100.202 |
+| right | `https://localhost:8444/desk/` | 192.168.100.203 |
 
----
+Release brakes, enable FCI. One Desk tab at a time (Franka's limit). Click through
+the cert warning.
 
-## 1. Repoint franka-interface at the NUC  *(as `robot-lab`)*
-
-`franka-interface` **connects** to `PC.IP` for its command stream. It currently
-points at the Lambda, so the NUC's Python would never be heard.
-
-```bash
-su - robot-lab                 # charles cannot write this file
-vim ~/work/deoxys_control/deoxys/config/franka_left.yml
-```
-
-```yaml
-PC:
-  IP: 192.168.100.201     # was 192.168.100.83 (Lambda)
-```
-
-While you're in there, `CONTROL.POLICY_RATE` is already `120` for left — fine for
-50 Hz. The right arm's config is at `20` and will need raising to `50` when that
-robot comes back.
-
-Then restart the left arm in the existing tmux session — it belongs to
-`robot-lab`, so attach as that user (`tmux attach`):
-
-```bash
-cd ~/work/deoxys_control/deoxys
-./auto_scripts/auto_arm.sh config/franka_left.yml
-```
-
-Currently running, started Jul 27 — kill these first:
-
-```
-160571  bin/franka-interface config/franka_left.yml
-190640  bin/gripper-interface config/franka_left.yml
-```
-
-> The gripper-interface has been pegged at 99.9% CPU for 21 h. Probably just how
-> it spins, but worth a look while you're restarting.
-
----
-
-## 2. Environment  *(back as `charles`)*
+## 2. Run it
 
 ```bash
 conda activate franka_teach
-cd ~/Franka-Teach
+cd ~/charles/Franka-Teach
+python3 run.py                      # both arms; interfaces, servers, web UI
 ```
 
-The env lives at `/home/charles/envs/franka_teach` and its editable installs point
-at `/home/charles/Franka-Teach`. Confirm that, because getting it wrong means
-editing one copy and running another:
+One process owns everything; Ctrl-C tears it all down. Then from your laptop:
 
 ```bash
-python -c "import frankateach; print(frankateach.__file__)"
-# -> /home/charles/Franka-Teach/frankateach/__init__.py
+ssh -L 8080:localhost:8080 franka   # open http://localhost:8080
 ```
 
-If it ever prints a `/home/robot-lab/...` path, the editable install has drifted.
-`deoxys` resolving to robot-lab's shared install is correct and expected.
+Useful flags: `--arms left`, `--calibrate left`, `--speed 0.1`, `--no-interface`
+(franka-interface already running in tmux), `--no-video`.
 
-miniforge's libmamba solver is broken on this box (`libfmt.so.10` missing); pass
-`--solver=classic` to any `conda` command that needs to solve.
+## 3. Calibrate
 
-Sanity check with no robot involved — all three should print `FAILED: none`:
+Mallet **off**. Press **Calibrate `<arm>`** in the page, or start with
+`--calibrate <arm>`.
 
-```bash
-python3 tests/test_box.py
-python3 tests/test_teleop.py
-python3 tests/test_webapp.py
-```
+Jog — left `WASD` + `E`/`Q`, right `IJKL` + `O`/`U`, `Space` freezes — to each
+corner **around the perimeter, not diagonally**, **Record corner** at each, then
+**Finish & save**, then **Trace perimeter** and watch the real table. **Back to
+play** reloads the box you just saved.
 
----
+The saved box is the largest rectangle *inside* all four corners, minus `margin`
+(15 mm). Check the summary: a large `corner spread` means the table is not level in
+that arm's base frame — shim it, or set `plane_mode: tilted` in
+`configs/airhockey.yaml` and re-teach. A large `plane residual` means it is
+twisted, which no plane mode can follow.
 
-## 3. Settle the 50 Hz question  ← **first thing that moves the arm**
+An arm with no calibration comes up on a provisional 12 cm box around its current
+pose, capped to 0.1 m/s. It will not move on startup, but it is not a play area.
 
-Terminal A:
+## 4. Before playing for real
 
-```bash
-python3 franka_server.py arm=left \
-    deoxys_config_path=deoxys_left_fast.yml \
-    control_freq=50 num_steps=1
-```
-
-Terminal B:
-
-```bash
-python3 scripts/rate_test.py --arm left --hz 50
-```
-
-It does a joint reset, then a ±5 cm sine in x for 20 s, and prints achieved rate
-and tracking error with a pass/fail gate.
-
-- **Both gates pass** → continue.
-- **Rate gate fails** → confirm `POLICY_RATE: 50` in *both* `franka_left.yml`
-  (NUC) and `deoxys_left_fast.yml` (repo), then retry. Still failing → set
-  `control_hz: 30` in `configs/airhockey.yaml` and move on; nothing else changes.
-
----
-
-## 4. Calibrate the left box  *(mallet off)*
-
-```bash
-python3 airhockey.py --calibrate --arm left
-```
-
-*Laptop:* `ssh -L 8080:localhost:8080 franka`, open `http://localhost:8080`.
-
-Jog with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>, <kbd>E</kbd>/<kbd>Q</kbd>
-for height, <kbd>Space</kbd> to freeze. Click **Record corner** at each of the four
-corners, **going around the perimeter** (not diagonally). Then **Finish & save**.
-
-The saved box is the largest rectangle fitting *inside* all four corners, minus
-`margin` (15 mm) — it can never reach the edge you taught. Check the summary:
-
-- **`corner spread` > 5 mm** → the table isn't level in the arm's base frame. A
-  single `plane_z` will scrape at one corner and lift at another. Re-teach more
-  carefully or shim the table.
-- **A "not very rectangular" warning** → your four corners were sloppy; the box
-  got shrunk to stay inside them. Fine, just smaller than you may expect.
-
-Then click **Trace perimeter** and *watch it*. This is the check that the box is
-where you think it is.
-
----
-
-## 5. First drive  *(mallet still off)*
-
-Edit `configs/airhockey.yaml`:
-
-```yaml
-speed: 0.1        # start slow
-```
-
-```bash
-python3 airhockey.py --arms left
-```
-
-Same tunnel, same URL. Press a movement key to take control (arms start frozen).
-
-Check, in order:
-
-1. Drive into all four walls — it should clip and hold, not fight.
-2. Press <kbd>H</kbd> — should glide to the box centre.
-3. Press <kbd>Space</kbd> — should stop dead.
-4. **Close the browser tab mid-motion** — the arm must freeze. Verified in test
-   as ≤6 mm of coast, but confirm it on the real thing.
-
-Then raise `speed` until it feels right. Mallet on **last**.
-
----
-
-## 6. When the right arm comes back
-
-```bash
-# NUC config/franka_right.yml: PC.IP -> 192.168.100.201, POLICY_RATE -> 50
-./auto_scripts/auto_arm.sh config/franka_right.yml
-python3 franka_server.py arm=right deoxys_config_path=deoxys_right_fast.yml \
-    control_freq=50 num_steps=1
-python3 airhockey.py --calibrate --arm right
-python3 airhockey.py                      # both arms
-```
-
-**Measure that the two calibrated boxes cannot intersect.** Nothing in this stack
-does cross-arm collision checking — disjoint boxes are the only thing keeping the
-arms off each other.
-
----
+- `python3 scripts/rate_test.py --arm <arm> --hz 50 --dz 0.12` — both gates should
+  pass. `--dz` raises the sweep off the table.
+- Drive into all four walls: it should clip and hold.
+- `H` homes, `Space` freezes, closing the browser tab must freeze the arm.
+- **Measure that the two boxes cannot intersect.** Nothing checks this.
+- Raise `speed` from 0.1 only once the above is clean. Mallet on last.
 
 ## Notes
 
-**Video.** No RealSense is attached to the NUC — `lsusb` shows only the root hubs
-and Bluetooth, USB 3.0 bus empty. Until one is plugged in *here*, the page shows
-"no camera publishing" and everything else works. Once attached:
-`python3 camera_server.py`, and set `view_cam_id` in `configs/airhockey.yaml`.
-
-Watch the **real table**, not the video pane — MJPEG encode + transfer + decode
-lags the arm badly. Video is for awareness, not for playing.
-
-**The config is the only guard.** `configs/airhockey.yaml` holds the coordinates
-the arm is driven to. A stale or fabricated box there will drive a real arm to
-fictitious coordinates. If you're unsure what's in it, re-run `--calibrate`.
-
-**Network path.** The browser sends the full set of held keys 50×/sec rather than
-key events, because over the tunnel (10.3 ms median, 29 ms p99) a single lost
-`keyup` would otherwise leave an arm driving. On link loss the arm coasts at most
-`watchdog` × `speed` and then freezes, with the box clip applying throughout.
+- **`configs/airhockey.yaml` is the only guard.** It holds the coordinates a real
+  arm is driven to. If you are unsure what is in it, recalibrate.
+- NUC-side franka-interface configs live in `deoxys_configs/` — see the README
+  there. Do not edit `~/work/deoxys_control`; it is shared.
+- Stop both servers before running `tests/` — they bind the same ports, and the
+  tests would otherwise drive the real arms (they now refuse instead).
+- Watch the table, not the video pane; MJPEG lags the arm badly.
+- The attached camera is a D435 serial `233522071078`, which is **not** in
+  `configs/camera.yaml`. Add it there, or set `view_cam_id: null`.

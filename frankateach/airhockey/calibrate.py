@@ -34,10 +34,12 @@ def trace_perimeter(arm, box, cfg, link=None):
     try:
         print(f"Tracing {arm} perimeter at {speed} m/s — watch the table edge.")
         rc = box.rect_corners()
-        link.glide_to(np.array([rc[0][0], rc[0][1], box.plane_z]), speed=speed)
+        # Corner z comes from box.z_at, so a tilted plane is traced along its own
+        # slope. Straight lines between two points on a plane stay on it.
+        link.glide_to(np.array([rc[0][0], rc[0][1], box.z_at(rc[0])]), speed=speed)
         for i in range(1, 5):
             c = rc[i % 4]
-            link.glide_to(np.array([c[0], c[1], box.plane_z]), speed=speed)
+            link.glide_to(np.array([c[0], c[1], box.z_at(c)]), speed=speed)
             print(f"  {CORNER_NAMES[i % 4]}: {c}")
         link.glide_to(box.home, speed=speed)
         print("Trace complete; parked at box centre.")

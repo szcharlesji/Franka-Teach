@@ -1,0 +1,48 @@
+# RIGHT arm, NUC side (franka-interface). See README.md in this directory.
+#
+#   this NUC  192.168.100.201      RIGHT robot  192.168.100.203
+#
+# The shared config/franka_right.yml pointed PC.IP at 192.168.100.46, which no
+# longer answers ARP; config/franka_right_nuc.yml had .201 but POLICY_RATE 20.
+PC:
+  NAME: "nuc"
+  IP: 192.168.100.201
+
+NUC:
+  NAME: "nuc"
+  IP: 192.168.100.201
+  PUB_PORT: 5556
+  SUB_PORT: 5555
+  GRIPPER_PUB_PORT: 5558
+  GRIPPER_SUB_PORT: 5557
+
+ROBOT:
+  IP: 192.168.100.203
+
+CONTROL:
+  STATE_PUBLISHER_RATE: 120
+  # Must match control_freq passed to franka_server.py and POLICY_RATE in
+  # frankateach/configs/deoxys_right_fast.yml. Air hockey runs at 50.
+  POLICY_RATE: 50
+  TRAJ_RATE: 500
+  ZMQ_NOBLOCK: true
+
+ARM_LOGGER:
+  CONSOLE:
+    LOGGER_NAME: "arm_logger"
+    LEVEL: "info"
+    USE: true
+  FILE:
+    LOGGER_NAME: "/home/robot-lab/charles/Franka-Teach/logs/deoxys_arm_right.log"
+    LEVEL: "debug"
+    USE: true
+
+GRIPPER_LOGGER:
+  CONSOLE:
+    LOGGER_NAME: "gripper_logger"
+    LEVEL: "info"
+    USE: true
+  FILE:
+    LOGGER_NAME: "/home/robot-lab/charles/Franka-Teach/logs/deoxys_gripper_right.log"
+    LEVEL: "debug"
+    USE: true

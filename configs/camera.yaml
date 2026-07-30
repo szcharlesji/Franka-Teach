@@ -1,12 +1,21 @@
+# cam_id is what view_cam_id in configs/airhockey.yaml refers to, and what
+# camera_server.py publishes under. Serials must match a camera that is actually
+# plugged into THIS machine -- `rs-enum` or lsusb will not tell you the serial, so
+# use: python3 -c "import pyrealsense2 as rs; [print(d.get_info(rs.camera_info.serial_number)) for d in rs.context().query_devices()]"
 cam_info:
   -
     cam_id: 1
-    cam_serial_num: "147322072736"
+    cam_serial_num: "233522071078"   # D435 attached to the NUC (verified 2026-07-29)
     type: realsense
-  -
-    cam_id: 2
-    cam_serial_num: "028522071213"
-    type: realsense
+  # Not present on the NUC -- kept for the Lambda's setup.
+  # -
+  #   cam_id: 2
+  #   cam_serial_num: "147322072736"
+  #   type: realsense
+  # -
+  #   cam_id: 3
+  #   cam_serial_num: "028522071213"
+  #   type: realsense
 
 cam_config:
   realsense:

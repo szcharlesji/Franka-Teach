@@ -1,6 +1,9 @@
-# Air hockey teleop. The `arms.*` geometry blocks below are written by
-#   python3 airhockey.py --calibrate --arm <right|left>
-# and are safe to hand-tune afterwards.
+# Air hockey teleop. The `arms.*` geometry blocks below are written by the
+# calibrate mode in the web UI (`python3 run.py --calibrate <arm>`, or the
+# Calibrate button while playing) and are safe to hand-tune afterwards.
+#
+# NOTE: saving a calibration rewrites this whole file via yaml.safe_dump, which
+# drops comments. If these notes vanish again, that is why.
 
 control_hz: 50        # per-arm command rate; see scripts/rate_test.py first
 speed: 0.35           # m/s at full key deflection
@@ -9,12 +12,22 @@ max_lead: 0.05        # m — how far the commanded target may outrun the real E
 home_speed: 0.15      # m/s when gliding back to the box centre on H
 margin: 0.015         # m — shrink in from the taught corners on every side
 watchdog: 0.1         # s — freeze an arm if input intent goes this stale
-plane_mode: constant  # constant | tilted (tilted not implemented yet)
+
+# constant: one height for the whole box, from the mean of the taught corners.
+# tilted:   follow the least-squares plane through the four corners' own z.
+# Only worth switching to tilted if the calibration summary reports a corner
+# spread you cannot shim away — a tilted plane cannot fix a *twisted* table.
+plane_mode: constant
+
+# Snap the held EE orientation to exactly tool-down when saving a calibration,
+# keeping its yaw. Without this the wrist holds whatever angle it happened to be
+# at when you taught the corners, so a flat mallet face does not sit flat.
+level_wrist: true
 
 # Calibration jog
 jog_speed: 0.08       # m/s while teaching corners
-jog_z_speed: 0.04     # m/s for Q/E height adjust
-trace_speed: 0.06     # m/s for the --verify perimeter trace
+jog_z_speed: 0.04     # m/s for the raise/lower keys
+trace_speed: 0.06     # m/s for the perimeter trace
 
 # Display
 view_cam_id: 1        # realsense cam_id to show; null disables the video feed
@@ -22,10 +35,10 @@ window: [1280, 720]
 
 arms:
   right:
-    keys: arrows
+    keys: ijkl
     deoxys_config: deoxys_right_fast.yml
     ready_joints: null   # null -> server default
-    # --- written by --calibrate ---
+    # --- written by calibration ---
     center: null
     yaw: 0.0
     half_extents: null
@@ -37,11 +50,16 @@ arms:
     keys: wasd
     deoxys_config: deoxys_left_fast.yml
     ready_joints: null
-    # --- written by --calibrate ---
-    center: null
-    yaw: 0.0
-    half_extents: null
-    plane_z: null
-    fixed_quat: null
-    corners: null
-    z_spread: 0.0
+    # --- written by calibration ---
+    center: [0.44219308346509933, -0.027719518169760704]
+    yaw: -0.013394710393221973
+    half_extents: [0.08765075143399534, 0.12623866112934745]
+    plane_z: 0.29016781598329544
+    fixed_quat: [0.9985955953598022, -0.0485997311770916, 0.008261836133897305,
+      0.019409775733947754]
+    corners:
+    - [0.3376535475254059, -0.16803331673145294, 0.28732216358184814]
+    - [0.5479733943939209, -0.17415203154087067, 0.2913006544113159]
+    - [0.5486976504325867, 0.11210513114929199, 0.29270362854003906]
+    - [0.3344477415084839, 0.1192021444439888, 0.28934481739997864]
+    z_spread: 0.005381464958190918

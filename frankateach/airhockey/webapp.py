@@ -32,7 +32,11 @@ from frankateach.constants import CAM_PORT, HOST
 
 STATIC = Path(__file__).resolve().parent / "static"
 
-from frankateach.airhockey.keyboard import JOG_DOWN, JOG_UP, KEY_SETS as WEB_KEY_SETS
+from frankateach.airhockey.keyboard import (
+    KEY_SETS as WEB_KEY_SETS,
+    resolve_jog_z_keys,
+    resolve_keys,
+)
 
 
 class CameraRelay:
@@ -300,14 +304,17 @@ CORNER_NAMES = [
     "corner 4 (near-left)",
 ]
 
-# Extra jog keys, calibration only (from keyboard.py).
-JOG_UP_CODE = JOG_UP
-JOG_DOWN_CODE = JOG_DOWN
-
 
 def build_calibrate_app(arm, jog, cfg):
     from frankateach.airhockey import config as ahconfig
     from frankateach.airhockey.box import box_from_corners
+
+    # Jog with the arm's own key set, not a hardcoded wasd. Otherwise calibrating
+    # the right arm uses the left arm's keys, which is exactly the sort of thing
+    # you discover with a mallet in your hand.
+    keyset_name = str(((cfg.get("arms") or {}).get(arm) or {}).get("keys", "wasd"))
+    keys = resolve_keys(keyset_name)
+    jog_z = resolve_jog_z_keys(keyset_name)
 
     app = web.Application()
     app["websockets"] = set()
@@ -324,8 +331,9 @@ def build_calibrate_app(arm, jog, cfg):
                 "mode": "calibrate",
                 "arm": arm,
                 "arms": [arm],
-                "keys": {arm: WEB_KEY_SETS["wasd"]},
-                "keyset_names": {arm: "wasd"},
+                "keys": {arm: keys},
+                "keyset_names": {arm: keyset_name},
+                "jog_z_keys": jog_z,
                 "corner_names": CORNER_NAMES,
                 "control_hz": cfg["control_hz"],
                 "has_camera": False,
@@ -352,7 +360,11 @@ def build_calibrate_app(arm, jog, cfg):
         corners = np.array(state["corners"])
         st = jog.get_status()
         box, warnings = box_from_corners(
-            corners, st.quat, margin=float(cfg["margin"])
+            corners,
+            st.quat,
+            margin=float(cfg["margin"]),
+            plane_mode=str(cfg.get("plane_mode", "constant")),
+            level_wrist=bool(cfg.get("level_wrist", False)),
         )
         path = ahconfig.save_box(arm, box)
         state["summary"] = {
@@ -364,6 +376,9 @@ def build_calibrate_app(arm, jog, cfg):
                 round(float(box.half_extents[1]) * 2, 3),
             ],
             "plane_z": round(float(box.plane_z), 4),
+            "plane_mode": str(box.plane_mode),
+            "tilt_mm_per_m": round(float(np.linalg.norm(box.plane_coeffs[1:])) * 1000, 1),
+            "plane_residual_mm": round(float(box.plane_residual) * 1000, 1),
             "z_spread_mm": round(float(box.z_spread) * 1000, 1),
             "quat": [round(float(v), 4) for v in box.quat],
             "warnings": warnings,
@@ -407,10 +422,9 @@ def build_calibrate_app(arm, jog, cfg):
                 if data.get("t") == "keys":
                     held = set(data.get("held") or [])
                     frozen = bool(data.get("frozen", True)) or state["busy"]
-                    k = WEB_KEY_SETS["wasd"]
-                    vx = float(k["up"] in held) - float(k["down"] in held)
-                    vy = float(k["left"] in held) - float(k["right"] in held)
-                    vz = float(JOG_UP_CODE in held) - float(JOG_DOWN_CODE in held)
+                    vx = float(keys["up"] in held) - float(keys["down"] in held)
+                    vy = float(keys["left"] in held) - float(keys["right"] in held)
+                    vz = float(jog_z["up"] in held) - float(jog_z["down"] in held)
                     jog.set_intent(vx, vy, vz, frozen=frozen)
 
                 elif data.get("t") == "cmd":
@@ -482,10 +496,10 @@ def build_calibrate_app(arm, jog, cfg):
     return app
 
 
-def serve_calibrate(arm, cfg, port=8080, bind="127.0.0.1"):
+def serve_calibrate(arm, cfg, port=8080, bind="127.0.0.1", reset=True):
     from frankateach.airhockey.operator import JogOperator
 
-    jog = JogOperator(arm, cfg)
+    jog = JogOperator(arm, cfg, reset=reset)
     jog.start()
     if not jog.wait_ready(timeout=90):
         print(f"[{arm}] jog did not come up in time")

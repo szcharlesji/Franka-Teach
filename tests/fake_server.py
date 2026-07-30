@@ -6,6 +6,7 @@ speed limit. Enough to exercise the whole teleop stack except deoxys itself.
 """
 
 import pickle
+import socket
 import threading
 import time
 
@@ -16,10 +17,33 @@ from frankateach.constants import arm_ports
 from frankateach.messages import FrankaAction, FrankaState
 
 
+def _assert_port_free(arm, port):
+    """Refuse to start if a real franka_server.py already owns this port.
+
+    The bind used to happen on the worker thread, where EADDRINUSE was invisible
+    to the test: the fake never came up, the client connected to the *real*
+    server on the same port, and the test quietly drove a live arm. Fail loudly
+    on the main thread instead.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError as exc:
+        raise RuntimeError(
+            f"port {port} is already bound, so the fake {arm} arm cannot start "
+            f"({exc}). A real 'franka_server.py arm={arm}' is almost certainly "
+            "running -- this test would have commanded the real robot. Stop the "
+            "server (or run the tests on a machine with no arm) and retry."
+        ) from exc
+    finally:
+        probe.close()
+
+
 class FakeServer(threading.Thread):
     def __init__(self, arm, max_speed=0.6, hz=50.0, work=0.0):
         super().__init__(daemon=True, name=f"fake-{arm}")
         self.port = arm_ports(arm)[0]
+        _assert_port_free(arm, self.port)
         self.pos = np.array([0.45, 0.0, 0.25])
         self.quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.max_step = max_speed / hz
@@ -28,11 +52,22 @@ class FakeServer(threading.Thread):
         self.ready = threading.Event()
         self.commands = []
         self.resets = 0
+        self.bind_error = None
 
     def run(self):
         ctx = zmq.Context()
         sock = ctx.socket(zmq.REP)
-        sock.bind(f"tcp://localhost:{self.port}")
+        try:
+            sock.bind(f"tcp://localhost:{self.port}")
+        except zmq.ZMQError as exc:
+            # Lost a race with something else binding since _assert_port_free.
+            # Record it and release ready() so the test fails instead of hanging.
+            self.bind_error = exc
+            print(f"[fake-{self.port}] bind failed: {exc}")
+            sock.close(0)
+            ctx.term()
+            self.ready.set()
+            return
         sock.setsockopt(zmq.RCVTIMEO, 200)
         self.ready.set()
         try:
