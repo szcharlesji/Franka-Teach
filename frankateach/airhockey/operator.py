@@ -39,6 +39,7 @@ class ArmStatus:
     pos: np.ndarray = field(default_factory=lambda: np.zeros(3))
     box_pos: np.ndarray = field(default_factory=lambda: np.zeros(2))
     speed: float = 0.0
+    speed_limit: float = 0.0
     rate: float = 0.0
     connected: bool = False
     stale: bool = False
@@ -63,6 +64,11 @@ class ArmOperator(threading.Thread):
         self.max_lead = float(cfg["max_lead"])
         self.watchdog = float(cfg["watchdog"])
         self.home_speed = float(cfg.get("home_speed", 0.15))
+        # Base-frame [x, y] gains, metres of z per m/s. See configs/airhockey.yaml.
+        self.z_ff = np.array(
+            [float(cfg.get("z_feedforward_x", 0.0)), float(cfg.get("z_feedforward_y", 0.0))]
+        )
+        self.z_ff_limit = abs(float(cfg.get("z_feedforward_limit", 0.01)))
         self.publish = publish
 
         self.intent = ArmIntent(frozen=True)
@@ -83,6 +89,14 @@ class ArmOperator(threading.Thread):
                 vx=vx, vy=vy, stamp=time.perf_counter(), home=home, frozen=frozen
             )
 
+    def set_speed_limit(self, speed):
+        """Change the play-speed cap without restarting the control loop."""
+        speed = float(speed)
+        if not np.isfinite(speed) or speed <= 0:
+            raise ValueError("speed limit must be a positive finite number")
+        with self._lock:
+            self.speed = speed
+
     def get_status(self):
         with self._lock:
             return self.status
@@ -92,6 +106,26 @@ class ArmOperator(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+
+    def _z_lead(self, vel):
+        """Vertical feedforward for the commanded xy velocity `vel` (base frame).
+
+        The controller does not compensate joint friction, so the EE rides off the
+        play plane while it translates -- by an amount proportional to velocity and
+        with a sign that flips with direction. We cannot fix that from here, but we
+        can command the opposite offset so the arm ends up where the box says.
+
+        `vel` is the commanded velocity, not the measured one, so this leads rather
+        than chases; that is the point. It is zero while homing and while frozen,
+        because `vel` is zeroed there.
+
+        Deliberately NOT applied in JogOperator: calibration has to measure the
+        real surface, and a feedforward would bias the taught corner heights by
+        exactly the error it is correcting for.
+        """
+        if not self.z_ff.any():
+            return 0.0
+        return float(np.clip(self.z_ff @ vel, -self.z_ff_limit, self.z_ff_limit))
 
     # -- control thread -----------------------------------------------------
     def run(self):
@@ -131,6 +165,7 @@ class ArmOperator(threading.Thread):
                     ),
                     connected=True,
                     stale=True,
+                    speed_limit=self.speed,
                 )
             self._ready.set()
             print(f"[{self.arm}] live at {self.hz:.0f} Hz")
@@ -144,7 +179,7 @@ class ArmOperator(threading.Thread):
 
             while not self._stop_event.is_set():
                 with self._lock:
-                    intent = self.intent
+                    intent, speed_limit = self.intent, self.speed
 
                 age = time.perf_counter() - intent.stamp
                 stale = age > self.watchdog
@@ -159,7 +194,7 @@ class ArmOperator(threading.Thread):
                     mag = np.linalg.norm(v)
                     if mag > 1.0:
                         v /= mag
-                    desired = self.box.rotate_intent(v[0], v[1]) * self.speed
+                    desired = self.box.rotate_intent(v[0], v[1]) * speed_limit
 
                 if intent.home:
                     vel = np.zeros(2)
@@ -170,7 +205,12 @@ class ArmOperator(threading.Thread):
                         self.box.center if dist <= step else target[:2] + delta / dist * step
                     )
                 else:
-                    vel = ramp(vel, desired, self.accel_time, dt, self.speed)
+                    vel = ramp(vel, desired, self.accel_time, dt, speed_limit)
+                    # A newly lowered limit is a hard cap, not merely a new ramp
+                    # target. This makes the WebUI control take effect on this tick.
+                    vel_mag = np.linalg.norm(vel)
+                    if vel_mag > speed_limit:
+                        vel *= speed_limit / vel_mag
                     target[:2] = target[:2] + vel * dt
 
                 target[:2] = self.box.clip(target[:2])
@@ -184,7 +224,7 @@ class ArmOperator(threading.Thread):
                 dist_xy = np.linalg.norm(delta_xy)
                 if dist_xy > self.max_lead:
                     target[:2] = actual[:2] + delta_xy / dist_xy * self.max_lead
-                target[2] = self.box.z_at(target[:2])
+                target[2] = self.box.z_at(target[:2]) + self._z_lead(vel)
 
                 state, action = self.link.send_pose(target)
 
@@ -204,6 +244,7 @@ class ArmOperator(threading.Thread):
                         pos=pos,
                         box_pos=self.box.to_box(pos[:2]),
                         speed=float(np.linalg.norm(vel)),
+                        speed_limit=speed_limit,
                         rate=1.0 / mean_period if mean_period > 0 else 0.0,
                         connected=True,
                         stale=stale or intent.frozen,

@@ -36,6 +36,10 @@
         border-radius:3px; padding:1px 6px; font-size:11px; }
   .help { color:var(--dim); font-size:12px; line-height:1.9; }
   .sup-arm { margin-right:14px; white-space:nowrap; }
+  .controls { display:flex; align-items:center; flex-wrap:wrap; gap:6px;
+              margin:8px 18px 0; }
+  .controls input { width:72px; background:#0d0d11; color:var(--fg);
+                    border:1px solid var(--line); border-radius:4px; padding:6px; }
   .dim { color:var(--dim); }
   .warnbar { background:rgba(255,107,107,.12); border:1px solid var(--bad);
              color:var(--bad); padding:8px 12px; border-radius:6px; margin:0 16px;
@@ -178,6 +182,12 @@ function connect() {
       return;
     }
     if (m.supervisor) lastSupervisor = m.supervisor;
+    if (Number.isFinite(m.speed_limit)) {
+      lastSpeedLimit = m.speed_limit;
+      const input = $('speed-limit');
+      if (input && document.activeElement !== input)
+        input.value = Number(lastSpeedLimit).toFixed(2);
+    }
     if (cfg && cfg.mode === 'calibrate') calState = m;   // flat payload
     else lastStatus = m.arms;                            // per-arm payload
   };
@@ -219,6 +229,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------------------------------------------------------------------------
 let calState = null;
 let lastSupervisor = null;
+let lastSpeedLimit = null;
 
 // Supervisor strip: whether each arm's franka-interface and franka_server are up.
 // Rendered here rather than in a terminal TUI because the NUC has no monitor, so
@@ -226,13 +237,77 @@ let lastSupervisor = null;
 function renderSupervisor() {
   const el = $('supervisor');
   if (!el || !lastSupervisor) return;
-  el.innerHTML = Object.entries(lastSupervisor).map(([arm, s]) => {
+  const shownArms = (cfg && (cfg.all_arms || cfg.arms)) || [];
+  el.innerHTML = shownArms.filter(arm => lastSupervisor[arm]).map(arm => {
+    const s = lastSupervisor[arm];
     const dot = ok => `<span class="tag ${ok ? 't-live' : 't-dead'}">${ok ? '●' : '○'}</span>`;
     const iface = s.interface === 'up' || s.interface === 'external';
     return `<span class="sup-arm"><b>${arm.toUpperCase()}</b>
       iface ${dot(iface)} server ${dot(s.server === 'up' && s.port_bound)}
       <span class="dim">:${s.port}</span></span>`;
   }).join('');
+
+  const restartState = cfg.mode === 'calibrate'
+    ? {[cfg.arm]: calState && calState.restart}
+    : Object.fromEntries(Object.entries(lastStatus).map(([a, s]) => [a, s.restart]));
+  for (const arm of shownArms) {
+    const button = document.querySelector(`button[data-restart="${arm}"]`);
+    const state = restartState[arm];
+    if (button) {
+      button.disabled = Boolean(state && state.restarting);
+      button.textContent = state && state.restarting
+        ? `Restarting ${arm}...` : `Restart ${arm} server`;
+    }
+  }
+  const messages = Object.values(restartState)
+    .filter(Boolean).map(s => s.message).filter(Boolean);
+  if ($('action-message')) $('action-message').textContent = messages.join('  ');
+}
+
+function installUnifiedControls(c, isCal) {
+  if (!c.unified) return;
+  const allArms = c.all_arms || c.arms;
+  const bar = document.createElement('div');
+  bar.className = 'controls help';
+  bar.innerHTML = `<span id="supervisor"></span>
+    <label>speed cap
+      <input id="speed-limit" type="number" min="0.01" max="1" step="0.01"
+             value="${Number(c.speed || 0.35).toFixed(2)}"> m/s
+    </label>
+    <button id="btn-speed">Apply speed</button>`
+    + (!isCal ? c.arms.map(a =>
+        `<button data-cal="${a}">Calibrate ${a}</button>`).join(' ') : '')
+    + allArms.map(a =>
+        `<button data-restart="${a}">Restart ${a} server</button>`).join(' ')
+    + `<span id="action-message" class="dim"></span>`;
+  document.querySelector('header').after(bar);
+
+  const applySpeed = () => {
+    const value = Number($('speed-limit').value);
+    if (!Number.isFinite(value) || value < 0.01 || value > 1) {
+      $('action-message').textContent = 'Speed must be 0.01–1.00 m/s.';
+      return;
+    }
+    sendCmd('speed', {speed: value});
+  };
+  $('btn-speed').onclick = applySpeed;
+  $('speed-limit').onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); applySpeed(); }
+  };
+  for (const btn of bar.querySelectorAll('button[data-cal]')) {
+    btn.onclick = () => {
+      held.clear();
+      sendCmd('calibrate', {arm: btn.dataset.cal});
+    };
+  }
+  for (const btn of bar.querySelectorAll('button[data-restart]')) {
+    btn.onclick = () => {
+      const arm = btn.dataset.restart;
+      if (!window.confirm(`Restart the ${arm} robot server? The arms will freeze.`)) return;
+      released = true; homing = false; held.clear();
+      sendCmd('restart_server', {arm});
+    };
+  }
 }
 
 // 'KeyW' -> 'W', 'ArrowUp' -> '↑', 'PageUp' -> 'PgUp'.
@@ -333,6 +408,7 @@ function renderCalibrate() {
   }
   $('banner').textContent = document.hasFocus() ? '' : 'PAGE NOT FOCUSED — ARM FROZEN';
   $('banner').style.color = 'var(--warn)';
+  renderSupervisor();
   requestAnimationFrame(renderCalibrate);
 }
 
@@ -348,6 +424,7 @@ fetch('/config').then(r => r.json()).then(c => {
 
   if (isCal) {
     document.querySelector('h1').textContent = `CALIBRATE — ${c.arm.toUpperCase()} ARM`;
+    installUnifiedControls(c, true);
     $('video').style.display = 'none';
     $('novideo').textContent = 'Jog the arm to each corner of the play area, then Record.';
     calibratePanes(c);
@@ -368,22 +445,7 @@ fetch('/config').then(r => r.json()).then(c => {
   if (c.has_camera) { $('video').src = '/video'; $('novideo').style.display = 'none'; }
   else { $('video').style.display = 'none'; }
 
-  // Unified launcher only: enter calibrate for an arm without restarting anything.
-  if (c.unified) {
-    const bar = document.createElement('div');
-    bar.className = 'help';
-    bar.style.margin = '8px 0';
-    bar.innerHTML = `<span id="supervisor"></span> `
-      + c.arms.map(a =>
-          `<button data-cal="${a}">Calibrate ${a}</button>`).join(' ');
-    document.querySelector('h1').after(bar);
-    for (const btn of bar.querySelectorAll('button[data-cal]')) {
-      btn.onclick = () => {
-        held.clear();
-        sendCmd('calibrate', { arm: btn.dataset.cal });
-      };
-    }
-  }
+  installUnifiedControls(c, false);
   connect();
   setInterval(sendKeys, 20);          // 50 Hz full-state snapshots
   requestAnimationFrame(render);

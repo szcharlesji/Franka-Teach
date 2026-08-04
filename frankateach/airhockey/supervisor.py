@@ -166,6 +166,16 @@ class ArmStack:
             cwd=REPO_ROOT,
         ).start()
 
+    def stop_server(self):
+        if self.server is not None:
+            self.server.stop()
+
+    def restart_server(self, timeout=90.0):
+        """Recycle only franka_server; the interface remains running."""
+        self.stop_server()
+        self.start_server()
+        return self.wait_for_server(timeout=timeout)
+
     def wait_for_server(self, timeout=90.0):
         """Block until the server answers get_state with a real pose.
 
@@ -293,6 +303,11 @@ class Supervisor:
             self.camera.stop()
         for stack in self.stacks.values():
             stack.stop()
+
+    def restart_server(self, arm, timeout=90.0):
+        if arm not in self.stacks:
+            raise ValueError(f"Unknown arm {arm!r}")
+        return self.stacks[arm].restart_server(timeout=timeout)
 
     def status(self):
         out = {arm: stack.status() for arm, stack in self.stacks.items()}

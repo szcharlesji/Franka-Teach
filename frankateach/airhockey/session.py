@@ -145,3 +145,15 @@ class ArmSession:
     def reload_box(self):
         """Re-read this arm's calibration and restart play with it."""
         return self.set_mode(PLAY, reload_box=True)
+
+    def set_speed_limit(self, speed):
+        """Set the requested play cap, respecting the provisional-box ceiling."""
+        speed = float(speed)
+        if not np.isfinite(speed) or speed <= 0:
+            raise ValueError("speed limit must be a positive finite number")
+        self.cfg["speed"] = speed
+        effective = min(speed, 0.1) if self.provisional else speed
+        op = self.operator
+        if self.mode == PLAY and op is not None:
+            op.set_speed_limit(effective)
+        return effective

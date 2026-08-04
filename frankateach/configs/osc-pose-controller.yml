@@ -20,7 +20,17 @@ Kp:
   # w_n = sqrt(Kp). At 150 that is 12.2 rad/s, which phase-lags a 0.25 Hz sweep
   # by ~15 deg (~0.16 s) and shows up as ~14 mm of tracking error in
   # scripts/rate_test.py. Raise it if the mallet trails the keys.
-  translation: 350.0
+  #
+  # Per-axis [x, y, z]. verify_controller_config expands a bare float to [v]*3
+  # but passes a 3-list through, so this is legal.
+  #
+  # z is doubled because scripts/wobble_test.py measured uncompensated joint
+  # friction pushing the EE vertically while it translates: 14.45 mm at 0.35 m/s
+  # along x (and only 2.25 mm along y, since y-travel is driven by the base yaw
+  # joint, whose vertical axis cannot produce a vertical force). That error is
+  # (1/Kp_z) * [Lambda^-1 F]_z, so it halves when Kp_z doubles. x and y are left
+  # at 350: raising them would not help, and would cost stability margin.
+  translation: [350.0, 350.0, 700.0]
   # rotation: 300.0
   rotation: 250.0
 

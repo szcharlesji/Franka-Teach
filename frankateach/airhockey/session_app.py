@@ -39,6 +39,9 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
     # Calibration is one arm at a time: two arms jogging free in 3 DoF with no
     # play box between them is the one situation nothing in this stack bounds.
     cal = {"arm": None, "corners": [], "message": "", "summary": None, "busy": False}
+    actions = {
+        arm: {"restarting": False, "message": ""} for arm in sessions
+    }
 
     # -- static + config ---------------------------------------------------
     async def index(request):
@@ -54,11 +57,13 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                     "mode": "calibrate",
                     "arm": arm,
                     "arms": [arm],
+                    "all_arms": arms,
                     "keys": {arm: resolve_keys(keymap[arm])},
                     "keyset_names": {arm: keymap[arm]},
                     "jog_z_keys": resolve_jog_z_keys(keymap[arm]),
                     "corner_names": CORNER_NAMES,
                     "control_hz": cfg["control_hz"],
+                    "speed": cfg["speed"],
                     "has_camera": False,
                     "unified": True,
                 }
@@ -130,6 +135,7 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
             "t": "status",
             "mode": "calibrate" if arm else "play",
             "supervisor": supervisor_block(),
+            "speed_limit": float(cfg["speed"]),
         }
         if arm:
             st = sessions[arm].get_status()
@@ -145,6 +151,7 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                     "done": cal["summary"] is not None,
                     "summary": cal["summary"],
                     "busy": cal["busy"],
+                    "restart": actions[arm],
                 }
             )
             return out
@@ -153,12 +160,13 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
         for a, sess in sessions.items():
             st = sess.get_status()
             box = sess.box
+            extents = np.zeros(2) if box is None else box.half_extents
+            box_pos = np.zeros(2) if st is None else st.box_pos
             out["arms"][a] = {
                 "pos": [round(float(v), 4) for v in (st.pos if st else np.zeros(3))],
-                "box_pos": [
-                    round(float(v), 4) for v in (st.box_pos if st else np.zeros(2))
-                ],
+                "box_pos": [round(float(v), 4) for v in box_pos],
                 "speed": round(float(st.speed), 3) if st else 0.0,
+                "speed_limit": round(float(st.speed_limit), 3) if st else 0.0,
                 "rate": round(float(st.rate), 1) if st else 0.0,
                 "connected": bool(st.connected) if st else False,
                 "stale": bool(st.stale) if st else True,
@@ -166,6 +174,15 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                 "error": (st.error if st else "") or sess.error,
                 "provisional": bool(sess.provisional),
                 "plane_mode": None if box is None else str(box.plane_mode),
+                "u": float(np.clip(box_pos[0] / extents[0], -1, 1))
+                if extents[0]
+                else 0.0,
+                "v": float(np.clip(box_pos[1] / extents[1], -1, 1))
+                if extents[1]
+                else 0.0,
+                "extents": [float(v) for v in extents],
+                "yaw_deg": round(float(np.degrees(box.yaw)), 2) if box else 0.0,
+                "restart": actions[a],
             }
         return out
 
@@ -181,6 +198,43 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
     def freeze_all():
         for sess in sessions.values():
             sess.set_intent(0.0, 0.0, frozen=True)
+
+    def set_speed_limit(value):
+        speed = float(value)
+        if not np.isfinite(speed) or not 0.01 <= speed <= 1.0:
+            raise ValueError("speed limit must be between 0.01 and 1.00 m/s")
+        cfg["speed"] = speed
+        for sess in sessions.values():
+            sess.set_speed_limit(speed)
+        print(f"[web] play speed limit set to {speed:.2f} m/s")
+
+    async def restart_server(arm):
+        if supervisor is None:
+            return
+        if arm not in sessions or actions.get(arm, {}).get("restarting"):
+            return
+        freeze_all()
+        state = actions[arm]
+        state.update({"restarting": True, "message": "Restarting server..."})
+        await broadcast()
+        mode = sessions[arm].mode or PLAY
+
+        def restart():
+            sessions[arm].stop()
+            supervisor.restart_server(arm)
+            if not sessions[arm].start(mode):
+                raise RuntimeError(sessions[arm].error or "operator failed to restart")
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, restart)
+            state["message"] = "Server restarted; arm is frozen."
+            print(f"[web] {arm} server restart complete")
+        except Exception as exc:
+            state["message"] = f"Restart failed: {type(exc).__name__}: {exc}"
+            print(f"[web] {arm} {state['message']}")
+        finally:
+            state["restarting"] = False
 
     async def enter_calibrate(arm):
         if arm not in sessions:
@@ -273,6 +327,7 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                 if data.get("t") == "keys":
                     held = set(data.get("held") or [])
                     frozen = bool(data.get("frozen", True))
+                    action_busy = any(s["restarting"] for s in actions.values())
                     arm = cal["arm"]
                     if arm:
                         k = resolve_keys(keymap[arm])
@@ -281,7 +336,7 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                         vy = float(k["left"] in held) - float(k["right"] in held)
                         vz = float(z["up"] in held) - float(z["down"] in held)
                         sessions[arm].set_intent(
-                            vx, vy, vz, frozen=frozen or cal["busy"]
+                            vx, vy, vz, frozen=frozen or cal["busy"] or action_busy
                         )
                     else:
                         home = KEY_HOME in held
@@ -292,13 +347,20 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                             sess.set_intent(
                                 vx,
                                 vy,
-                                frozen=frozen or KEY_FREEZE in held,
+                                frozen=frozen or KEY_FREEZE in held or action_busy,
                                 home=home,
                             )
 
                 elif data.get("t") == "cmd":
                     cmd = data.get("cmd")
-                    if cmd == "calibrate":
+                    if cmd == "speed":
+                        try:
+                            set_speed_limit(data.get("speed"))
+                        except (TypeError, ValueError) as exc:
+                            print(f"[web] rejected speed limit: {exc}")
+                    elif cmd == "restart_server":
+                        await restart_server(data.get("arm"))
+                    elif cmd == "calibrate":
                         await enter_calibrate(data.get("arm"))
                     elif cmd == "play":
                         await leave_calibrate()

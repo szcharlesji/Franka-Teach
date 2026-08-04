@@ -148,8 +148,23 @@ def test_single_arm():
         abs(diagonal - straight) < 0.02,
         f"(straight {straight:.3f} m/s, diagonal {diagonal:.3f} m/s)",
     )
-    check("speed reaches the configured maximum", abs(straight - CFG["speed"]) < 0.02,
-          f"({straight:.3f} vs {CFG['speed']})")
+    check(
+        "speed reaches the configured maximum",
+        abs(straight - CFG["speed"]) < 0.02,
+        f"({straight:.3f} vs {CFG['speed']})",
+    )
+
+    # The run.py WebUI changes this while the operator is live. Lowering it is
+    # a hard cap, including when the arm was already moving faster.
+    op.set_speed_limit(0.08)
+    op.set_intent(1.0, 0.0)
+    time.sleep(0.08)
+    limited = op.get_status()
+    check(
+        "live speed-limit update takes effect immediately",
+        limited.speed <= 0.081 and limited.speed_limit == 0.08,
+        f"(speed={limited.speed:.3f}, limit={limited.speed_limit:.3f})",
+    )
 
     op.stop()
     op.join(timeout=5)
@@ -217,6 +232,14 @@ def test_config_roundtrip():
     tmp = tempfile.mktemp(suffix=".yaml")
     shutil.copy(src, tmp)
     try:
+        # Blank the arm first. This used to just assume the right arm was
+        # uncalibrated in the real config, which quietly became false the moment
+        # someone calibrated it -- the test then failed for a reason that had
+        # nothing to do with the code under test.
+        blanked = yaml.safe_load(open(tmp))
+        blanked["arms"]["right"] = {"keys": "ijkl", "center": None}
+        with open(tmp, "w") as f:
+            yaml.safe_dump(blanked, f, sort_keys=False)
         try:
             ahconfig.load_box("right", tmp)
             check("uncalibrated arm raises a helpful error", False)
