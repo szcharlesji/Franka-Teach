@@ -38,8 +38,9 @@
   .sup-arm { margin-right:14px; white-space:nowrap; }
   .controls { display:flex; align-items:center; flex-wrap:wrap; gap:6px;
               margin:8px 18px 0; }
-  .controls input { width:72px; background:#0d0d11; color:var(--fg);
-                    border:1px solid var(--line); border-radius:4px; padding:6px; }
+  .controls input[type=number] { width:72px; background:#0d0d11; color:var(--fg);
+                                 border:1px solid var(--line); border-radius:4px; padding:6px; }
+  .controls input[type=checkbox] { accent-color:var(--accent); }
   .dim { color:var(--dim); }
   .warnbar { background:rgba(255,107,107,.12); border:1px solid var(--bad);
              color:var(--bad); padding:8px 12px; border-radius:6px; margin:0 16px;
@@ -64,6 +65,7 @@
 <header>
   <h1>FRANKA AIR HOCKEY</h1>
   <span id="conn" class="tag t-dead">CONNECTING</span>
+  <span id="gamepad" class="tag t-dead">NO GAMEPAD</span>
   <span id="rtt" style="color:var(--dim);font-size:12px"></span>
   <span id="banner"></span>
 </header>
@@ -80,6 +82,7 @@
       along the <em>table</em> axes, not the robot base.<br>
       <kbd>H</kbd> home both &nbsp; <kbd>Space</kbd> freeze &nbsp; <kbd>Esc</kbd> release<br>
       Arms start frozen. Press a movement key to take control.<br>
+      Gamepad: left stick drives left arm, right stick drives right arm.<br>
       Clicking away from this page freezes both arms.
     </div>
   </div>
@@ -98,6 +101,8 @@
 const held = new Set();
 let frozen = true, released = true, homing = false;
 let cfg = null, ws = null, lastStatus = {}, rttMs = null;
+let serverGamepad = null;
+let sameSideControls = false, gamepadNeedsCenter = false;
 
 const $ = id => document.getElementById(id);
 
@@ -151,7 +156,10 @@ function render() {
       `${(s.extents[0]*200).toFixed(0)}×${(s.extents[1]*200).toFixed(0)} cm  yaw ${s.yaw_deg}°`;
   }
   let b = '', col = 'var(--dim)';
-  if (!document.hasFocus())  { b = 'PAGE NOT FOCUSED — ARMS FROZEN'; col = 'var(--warn)'; }
+  if (serverGamepad && serverGamepad.active) {
+    b = 'USB GAMEPAD'; col = 'var(--good)';
+  }
+  else if (!document.hasFocus())  { b = 'PAGE NOT FOCUSED — ARMS FROZEN'; col = 'var(--warn)'; }
   else if (released)         { b = 'RELEASED — press a movement key'; col = 'var(--dim)'; }
   else if (held.has('Space')){ b = 'FREEZE'; col = 'var(--warn)'; }
   else if (homing)           { b = 'HOMING'; col = 'var(--accent)'; }
@@ -182,6 +190,15 @@ function connect() {
       return;
     }
     if (m.supervisor) lastSupervisor = m.supervisor;
+    if (m.gamepad) serverGamepad = m.gamepad;
+    if (typeof m.same_side_controls === 'boolean'
+        && m.same_side_controls !== sameSideControls) {
+      sameSideControls = m.same_side_controls;
+      gamepadNeedsCenter = true;
+      released = true; homing = false; held.clear();
+      const toggle = $('direction-toggle');
+      if (toggle) toggle.checked = sameSideControls;
+    }
     if (Number.isFinite(m.speed_limit)) {
       lastSpeedLimit = m.speed_limit;
       const input = $('speed-limit');
@@ -197,16 +214,69 @@ function sendKeys() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const blur = !document.hasFocus();
   if (blur) { held.clear(); homing = false; }
+  const axes = readGamepad();
   const t0 = performance.now();
   ws.send(JSON.stringify({
     t: 'keys',
     held: Array.from(held),
+    axes,
     frozen: released || blur || held.has('Space'),
     home: homing && !released && !blur,
   }));
   // crude one-way estimate; good enough to spot a degrading link
   rttMs = rttMs === null ? 0 : rttMs * 0.9 + (performance.now() - t0) * 0.1;
 }
+
+const GAMEPAD_DEADZONE = 0.12;
+
+function gamepadStick(rawX, rawY) {
+  const x = Number(rawX) || 0, y = Number(rawY) || 0;
+  const magnitude = Math.min(1, Math.hypot(x, y));
+  if (magnitude <= GAMEPAD_DEADZONE) return [0, 0];
+  const scaled = (magnitude - GAMEPAD_DEADZONE) / (1 - GAMEPAD_DEADZONE);
+  // Protocol order is [table-forward, table-left]. Browser gamepad axes are
+  // [screen-right, screen-down], hence both signs are inverted.
+  return [-y / magnitude * scaled, -x / magnitude * scaled];
+}
+
+function readGamepad() {
+  const pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
+  const pad = pads.find(p => p && p.connected);
+  const tag = $('gamepad');
+  if (!pad) {
+    if (tag && serverGamepad && serverGamepad.connected) {
+      tag.className = 'tag t-live'; tag.textContent = 'USB GAMEPAD';
+      tag.title = serverGamepad.path || 'controller attached to server';
+    } else if (tag) {
+      tag.className = 'tag t-dead'; tag.textContent = 'NO GAMEPAD';
+    }
+    return {};
+  }
+  if (tag) {
+    tag.className = 'tag t-live';
+    tag.textContent = `GAMEPAD ${pad.index + 1}`;
+    tag.title = pad.id;
+  }
+  const axes = {
+    left: gamepadStick(pad.axes[0], pad.axes[1]),
+    right: gamepadStick(pad.axes[2], pad.axes[3]),
+  };
+  const moving = Object.values(axes).some(v => Math.hypot(v[0], v[1]) > 0);
+  if (gamepadNeedsCenter) {
+    if (!moving) gamepadNeedsCenter = false;
+    return {left: [0, 0], right: [0, 0]};
+  }
+  if (moving) {
+    released = false;
+    homing = false;
+  }
+  return axes;
+}
+
+window.addEventListener('gamepaddisconnected', () => {
+  released = true;
+  homing = false;
+});
 
 const MOVE_CODES = new Set();
 window.addEventListener('keydown', e => {
@@ -256,7 +326,7 @@ function renderSupervisor() {
     if (button) {
       button.disabled = Boolean(state && state.restarting);
       button.textContent = state && state.restarting
-        ? `Restarting ${arm}...` : `Restart ${arm} server`;
+        ? `Restarting ${arm}...` : `Restart ${arm} arm`;
     }
   }
   const messages = Object.values(restartState)
@@ -275,10 +345,14 @@ function installUnifiedControls(c, isCal) {
              value="${Number(c.speed || 0.35).toFixed(2)}"> m/s
     </label>
     <button id="btn-speed">Apply speed</button>`
+    + (!isCal ? `<label title="Left controls rotate 90 degrees; right controls rotate 270 degrees">
+        <input id="direction-toggle" type="checkbox"
+               ${c.same_side_controls ? 'checked' : ''}> Players on same side
+      </label>` : '')
     + (!isCal ? c.arms.map(a =>
         `<button data-cal="${a}">Calibrate ${a}</button>`).join(' ') : '')
     + allArms.map(a =>
-        `<button data-restart="${a}">Restart ${a} server</button>`).join(' ')
+        `<button data-restart="${a}">Restart ${a} arm</button>`).join(' ')
     + `<span id="action-message" class="dim"></span>`;
   document.querySelector('header').after(bar);
 
@@ -294,6 +368,15 @@ function installUnifiedControls(c, isCal) {
   $('speed-limit').onkeydown = e => {
     if (e.key === 'Enter') { e.preventDefault(); applySpeed(); }
   };
+  const directionToggle = $('direction-toggle');
+  if (directionToggle) {
+    directionToggle.onchange = () => {
+      sameSideControls = directionToggle.checked;
+      gamepadNeedsCenter = true;
+      released = true; homing = false; held.clear();
+      sendCmd('same_side_controls', {enabled: sameSideControls});
+    };
+  }
   for (const btn of bar.querySelectorAll('button[data-cal]')) {
     btn.onclick = () => {
       held.clear();
@@ -303,7 +386,7 @@ function installUnifiedControls(c, isCal) {
   for (const btn of bar.querySelectorAll('button[data-restart]')) {
     btn.onclick = () => {
       const arm = btn.dataset.restart;
-      if (!window.confirm(`Restart the ${arm} robot server? The arms will freeze.`)) return;
+      if (!window.confirm(`Restart the ${arm} robot stack? The arms will freeze.`)) return;
       released = true; homing = false; held.clear();
       sendCmd('restart_server', {arm});
     };
@@ -414,6 +497,7 @@ function renderCalibrate() {
 
 fetch('/config').then(r => r.json()).then(c => {
   cfg = c;
+  sameSideControls = Boolean(c.same_side_controls);
   const isCal = c.mode === 'calibrate';
   for (const arm of c.arms) for (const code of Object.values(c.keys[arm])) MOVE_CODES.add(code);
   // Jog raise/lower comes from the server so it matches the arm's key set.

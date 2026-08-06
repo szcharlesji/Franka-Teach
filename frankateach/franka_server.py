@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import pickle
 import time
+from contextlib import contextmanager
 import numpy as np
 
 from deoxys.utils import YamlConfig
@@ -44,8 +45,9 @@ class FrankaServer:
         control_freq=CONTROL_FREQ,
         num_steps=3,
         start_joint_pos=None,
+        control_gripper=True,
     ):
-        self._robot = Robot(cfg, control_freq)
+        self._robot = Robot(cfg, control_freq, control_gripper=control_gripper)
         self.num_steps = num_steps
         self.start_joint_pos = (
             list(start_joint_pos)
@@ -108,17 +110,35 @@ class FrankaServer:
 
 
 class Robot(FrankaInterface):
-    def __init__(self, cfg, control_freq):
+    def __init__(self, cfg, control_freq, control_gripper=True):
         super(Robot, self).__init__(
             general_cfg_file=os.path.join(CONFIG_ROOT, cfg),
             use_visualizer=False,
             control_freq=control_freq,
+            has_gripper=control_gripper,
+            automatic_gripper_reset=control_gripper,
         )
         self.velocity_controller_cfg = verify_controller_config(
             YamlConfig(
                 os.path.join(CONFIG_ROOT, "osc-pose-controller.yml")
             ).as_easydict()
         )
+
+    @contextmanager
+    def _gripper_mode(self, enabled):
+        """Temporarily suppress every gripper side effect for an arm-only command."""
+        old_has_gripper = self.has_gripper
+        old_automatic_reset = self.automatic_gripper_reset
+        if not enabled:
+            # control() otherwise treats zero as CLOSE, while preprocess() opens
+            # the hand whenever the arm switches controller types.
+            self.has_gripper = False
+            self.automatic_gripper_reset = False
+        try:
+            yield
+        finally:
+            self.has_gripper = old_has_gripper
+            self.automatic_gripper_reset = old_automatic_reset
 
     def reset_robot(self):
         self.reset()
@@ -130,34 +150,42 @@ class Robot(FrankaInterface):
         print("Franka is connected")
 
     def osc_move(self, target_pos, target_quat, gripper_state, num_steps=3):
-        for _ in range(num_steps):
-            target_mat = transform_utils.pose2mat(pose=(target_pos, target_quat))
+        with self._gripper_mode(gripper_state is not None):
+            for _ in range(num_steps):
+                target_mat = transform_utils.pose2mat(pose=(target_pos, target_quat))
 
-            current_quat, current_pos = self.last_eef_quat_and_pos
-            current_mat = transform_utils.pose2mat(
-                pose=(current_pos.flatten(), current_quat.flatten())
-            )
+                current_quat, current_pos = self.last_eef_quat_and_pos
+                current_mat = transform_utils.pose2mat(
+                    pose=(current_pos.flatten(), current_quat.flatten())
+                )
 
-            pose_error = transform_utils.get_pose_error(
-                target_pose=target_mat, current_pose=current_mat
-            )
+                pose_error = transform_utils.get_pose_error(
+                    target_pose=target_mat, current_pose=current_mat
+                )
 
-            if np.dot(target_quat, current_quat) < 0.0:
-                current_quat = -current_quat
+                if np.dot(target_quat, current_quat) < 0.0:
+                    current_quat = -current_quat
 
-            quat_diff = transform_utils.quat_distance(target_quat, current_quat)
-            axis_angle_diff = transform_utils.quat2axisangle(quat_diff)
+                quat_diff = transform_utils.quat_distance(target_quat, current_quat)
+                axis_angle_diff = transform_utils.quat2axisangle(quat_diff)
 
-            action_pos = pose_error[:3]
-            action_axis_angle = axis_angle_diff.flatten()
+                action_pos = pose_error[:3]
+                action_axis_angle = axis_angle_diff.flatten()
 
-            action = action_pos.tolist() + action_axis_angle.tolist() + [gripper_state]
+                # Deoxys still requires the eighth element when has_gripper=False;
+                # it is ignored rather than sent to gripper-interface.
+                gripper_action = 0 if gripper_state is None else gripper_state
+                action = (
+                    action_pos.tolist()
+                    + action_axis_angle.tolist()
+                    + [gripper_action]
+                )
 
-            self.control(
-                controller_type="OSC_POSE",
-                action=action,
-                controller_cfg=self.velocity_controller_cfg,
-            )
+                self.control(
+                    controller_type="OSC_POSE",
+                    action=action,
+                    controller_cfg=self.velocity_controller_cfg,
+                )
 
     def reset_joints(
         self,
@@ -170,7 +198,9 @@ class Robot(FrankaInterface):
         assert type(start_joint_pos) is list or type(start_joint_pos) is np.ndarray
         controller_cfg = get_default_controller_config(controller_type="JOINT_POSITION")
 
-        if gripper_open:
+        if gripper_open is None:
+            gripper_action = 0
+        elif gripper_open:
             gripper_action = -1
         else:
             gripper_action = 1
@@ -186,21 +216,24 @@ class Robot(FrankaInterface):
         else:
             action = start_joint_pos.tolist() + [gripper_action]
         start_time = time.time()
-        while True:
-            if self.received_states and self.check_nonzero_configuration():
-                if (
-                    np.max(np.abs(np.array(self.last_q) - np.array(start_joint_pos)))
-                    < 1e-3
-                ):
-                    break
-            self.control(
-                controller_type="JOINT_POSITION",
-                action=action,
-                controller_cfg=controller_cfg,
-            )
-            end_time = time.time()
+        with self._gripper_mode(gripper_open is not None):
+            while True:
+                if self.received_states and self.check_nonzero_configuration():
+                    if (
+                        np.max(
+                            np.abs(np.array(self.last_q) - np.array(start_joint_pos))
+                        )
+                        < 1e-3
+                    ):
+                        break
+                self.control(
+                    controller_type="JOINT_POSITION",
+                    action=action,
+                    controller_cfg=controller_cfg,
+                )
+                end_time = time.time()
 
-            # Add timeout
-            if end_time - start_time > timeout:
-                break
+                # Add timeout
+                if end_time - start_time > timeout:
+                    break
         return True

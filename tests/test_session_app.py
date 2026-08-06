@@ -77,7 +77,7 @@ class FakeSupervisor:
     def __init__(self):
         self.restarts = []
 
-    def restart_server(self, arm):
+    def restart_arm(self, arm):
         self.restarts.append(arm)
 
     def status(self):
@@ -87,7 +87,13 @@ class FakeSupervisor:
                 "server": "up",
                 "port_bound": True,
                 "port": 9001,
-            }
+            },
+            "right": {
+                "interface": "up",
+                "server": "up",
+                "port_bound": True,
+                "port": 8901,
+            },
         }
 
 
@@ -113,24 +119,78 @@ async def main():
         "control_hz": 50,
         "speed": 0.35,
         "watchdog": 0.1,
-        "arms": {"left": {"keys": "wasd"}},
+        "arms": {"left": {"keys": "wasd"}, "right": {"keys": "arrows"}},
     }
     session = FakeSession("left", cfg)
+    right_session = FakeSession("right", cfg)
     supervisor = FakeSupervisor()
-    app = build_app({"left": session}, cfg, supervisor=supervisor)
+    app = build_app(
+        {"left": session, "right": right_session}, cfg, supervisor=supervisor
+    )
     client = TestClient(TestServer(app))
     await client.start_server()
 
     response = await client.get("/")
     html = await response.text()
     check("unified page includes speed control", "Apply speed" in html)
-    check("unified page includes server restart", "data-restart" in html)
+    check("unified page includes arm restart", "data-restart" in html)
+    check("unified page includes direction toggle", "direction-toggle" in html)
 
     ws = await client.ws_connect("/ws")
+    await ws.send_json(
+        {
+            "t": "keys",
+            "held": [],
+            "axes": {"left": [0.4, -0.7], "right": [-0.2, 0.8]},
+            "frozen": False,
+        }
+    )
+    await asyncio.sleep(0.05)
+    stick_args, stick_kwargs = session.intents[-1]
+    check(
+        "left gamepad stick maps to left arm",
+        np.allclose(stick_args[:2], [0.4, -0.7])
+        and not stick_kwargs.get("frozen"),
+    )
+    right_args, right_kwargs = right_session.intents[-1]
+    check(
+        "right gamepad stick maps to right arm",
+        np.allclose(right_args[:2], [-0.2, 0.8])
+        and not right_kwargs.get("frozen"),
+    )
+
+    await ws.send_json(
+        {"t": "cmd", "cmd": "same_side_controls", "enabled": True}
+    )
+    await ws.send_json(
+        {
+            "t": "keys",
+            "held": [],
+            "axes": {"left": [0.4, -0.7], "right": [-0.2, 0.8]},
+            "frozen": False,
+        }
+    )
+    await asyncio.sleep(0.05)
+    same_side_left_args, same_side_left_kwargs = session.intents[-1]
+    same_side_right_args, same_side_right_kwargs = right_session.intents[-1]
+    check(
+        "same-side toggle rotates left stick 90 degrees",
+        np.allclose(same_side_left_args[:2], [0.7, 0.4])
+        and not same_side_left_kwargs.get("frozen"),
+    )
+    check(
+        "same-side toggle rotates right stick 270 degrees",
+        np.allclose(same_side_right_args[:2], [0.8, 0.2])
+        and not same_side_right_kwargs.get("frozen"),
+    )
+    status = await newest_status(ws)
+    check("status publishes same-side layout", status["same_side_controls"] is True)
+
     await ws.send_json({"t": "cmd", "cmd": "speed", "speed": 0.12})
     status = await newest_status(ws)
     check("speed command updates config", cfg["speed"] == 0.12)
     check("speed command reaches live session", session.speed_limits == [0.12])
+    check("speed command reaches right session", right_session.speed_limits == [0.12])
     check("status publishes current cap", status["speed_limit"] == 0.12)
 
     await ws.send_json({"t": "cmd", "cmd": "speed", "speed": 2.0})
@@ -149,7 +209,7 @@ async def main():
     check("restart rebuilds the arm session", session.stops == 1 and session.starts == 1)
     check(
         "restart leaves controls frozen",
-        bool(session.intents and session.intents[0][1].get("frozen")),
+        any(kwargs.get("frozen") for _, kwargs in session.intents),
     )
 
     await ws.close()

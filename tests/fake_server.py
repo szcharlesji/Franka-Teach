@@ -51,6 +51,7 @@ class FakeServer(threading.Thread):
         self.stop = threading.Event()
         self.ready = threading.Event()
         self.commands = []
+        self.gripper_commands = []
         self.resets = 0
         self.bind_error = None
 
@@ -78,6 +79,7 @@ class FakeServer(threading.Thread):
                     continue
                 if msg != b"get_state":
                     action: FrankaAction = pickle.loads(msg)
+                    self.gripper_commands.append(action.gripper)
                     if action.reset:
                         self.resets += 1
                         self.pos = np.array([0.45, 0.0, 0.25])

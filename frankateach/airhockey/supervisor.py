@@ -162,6 +162,7 @@ class ArmStack:
                 f"deoxys_config_path={self.deoxys_config}",
                 f"control_freq={self.control_freq}",
                 f"num_steps={self.num_steps}",
+                "control_gripper=false",
             ],
             cwd=REPO_ROOT,
         ).start()
@@ -173,6 +174,17 @@ class ArmStack:
     def restart_server(self, timeout=90.0):
         """Recycle only franka_server; the interface remains running."""
         self.stop_server()
+        self.start_server()
+        return self.wait_for_server(timeout=timeout)
+
+    def restart(self, timeout=90.0, settle=2.0):
+        """Recycle the managed arm stack after a robot/control-loop fault."""
+        self.stop()
+        self.server = None
+        self.interface = None
+        self.start_interface()
+        if self.with_interface:
+            time.sleep(settle)
         self.start_server()
         return self.wait_for_server(timeout=timeout)
 
@@ -294,7 +306,14 @@ class Supervisor:
             # play. CameraRelay reports "no frames" and the page falls back.
             self.camera = Managed(
                 "camera",
-                [shutil.which("python3") or "python3", "camera_server.py"],
+                [
+                    shutil.which("python3") or "python3",
+                    "camera_server.py",
+                    # The WebUI consumes RGB only. Depth alignment/compression at
+                    # 30 FPS used ~60% CPU and coincided with missed 1 kHz Franka
+                    # deadlines; data-collection launches remain unchanged.
+                    "cam_config.realsense.depth=false",
+                ],
                 cwd=REPO_ROOT,
             ).start()
 
@@ -308,6 +327,11 @@ class Supervisor:
         if arm not in self.stacks:
             raise ValueError(f"Unknown arm {arm!r}")
         return self.stacks[arm].restart_server(timeout=timeout)
+
+    def restart_arm(self, arm, timeout=90.0):
+        if arm not in self.stacks:
+            raise ValueError(f"Unknown arm {arm!r}")
+        return self.stacks[arm].restart(timeout=timeout)
 
     def status(self):
         out = {arm: stack.status() for arm, stack in self.stacks.items()}

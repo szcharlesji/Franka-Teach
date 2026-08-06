@@ -70,6 +70,11 @@ def test_single_arm():
     check("operator connected", op.get_status().connected, f"({op.get_status().error})")
     check("performed a joint reset", server.resets == 1, f"(resets={server.resets})")
     check(
+        "startup and play never command the gripper",
+        bool(server.gripper_commands)
+        and all(command is None for command in server.gripper_commands),
+    )
+    check(
         "homed to the box centre",
         np.allclose(server.pos[:2], box.center, atol=0.01),
         f"(pos={server.pos[:2]})",

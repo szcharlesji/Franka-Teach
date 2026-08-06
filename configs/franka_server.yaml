@@ -12,5 +12,10 @@ deoxys_config_path: "deoxys_right.yml"
 control_freq: 20
 num_steps: 3
 
+# False makes the server arm-only: neither controller transitions nor incoming
+# actions can publish to gripper-interface. run.py always overrides this to false;
+# standalone VR teleop keeps the historical true default.
+control_gripper: true
+
 # null -> DEFAULT_START_JOINT_POS in frankateach/franka_server.py
 start_joint_pos: null

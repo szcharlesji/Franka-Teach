@@ -10,6 +10,7 @@ def main(cfg):
         control_freq=cfg.control_freq,
         num_steps=cfg.num_steps,
         start_joint_pos=cfg.start_joint_pos,
+        control_gripper=cfg.control_gripper,
     )
     fs.init_server()
 

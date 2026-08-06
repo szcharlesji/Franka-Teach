@@ -20,6 +20,7 @@ from aiohttp import WSMsgType, web
 from frankateach.airhockey import config as ahconfig
 from frankateach.airhockey.box import box_from_corners
 from frankateach.airhockey.calibrate import trace_perimeter
+from frankateach.airhockey.gamepad import LocalGamepad
 from frankateach.airhockey.keyboard import (
     KEY_FREEZE,
     KEY_HOME,
@@ -30,7 +31,7 @@ from frankateach.airhockey.session import CALIBRATE, PLAY
 from frankateach.airhockey.webapp import CORNER_NAMES, STATIC, CameraRelay
 
 
-def build_app(sessions, cfg, supervisor=None, camera=None):
+def build_app(sessions, cfg, supervisor=None, camera=None, gamepad=None):
     app = web.Application()
     app["websockets"] = set()
 
@@ -42,6 +43,8 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
     actions = {
         arm: {"restarting": False, "message": ""} for arm in sessions
     }
+    controls = {"same_side": False, "revision": 0}
+    local_gamepad_active = set()
 
     # -- static + config ---------------------------------------------------
     async def index(request):
@@ -64,6 +67,7 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                     "corner_names": CORNER_NAMES,
                     "control_hz": cfg["control_hz"],
                     "speed": cfg["speed"],
+                    "same_side_controls": controls["same_side"],
                     "has_camera": False,
                     "unified": True,
                 }
@@ -77,6 +81,7 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                 "jog_z_keys": None,
                 "control_hz": cfg["control_hz"],
                 "speed": cfg["speed"],
+                "same_side_controls": controls["same_side"],
                 "watchdog": cfg["watchdog"],
                 "has_camera": camera is not None,
                 "unified": True,
@@ -136,6 +141,8 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
             "mode": "calibrate" if arm else "play",
             "supervisor": supervisor_block(),
             "speed_limit": float(cfg["speed"]),
+            "gamepad": gamepad.status() if gamepad is not None else {},
+            "same_side_controls": controls["same_side"],
         }
         if arm:
             st = sessions[arm].get_status()
@@ -199,6 +206,84 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
         for sess in sessions.values():
             sess.set_intent(0.0, 0.0, frozen=True)
 
+    def player_controls(arm, vx, vy):
+        """Rotate controls when both players stand along the same table side."""
+        if not controls["same_side"] or cal["arm"] is not None:
+            return vx, vy
+        if arm == "left":
+            return -vy, vx  # 90 degrees
+        if arm == "right":
+            return vy, -vx  # 270 degrees
+        return vx, vy
+
+    def gamepad_intent(data, arm):
+        """Validated analogue [forward, left] intent, or None near centre."""
+        axes = data.get("axes") or {}
+        raw = axes.get(arm) if isinstance(axes, dict) else None
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            return None
+        try:
+            intent = np.asarray([float(raw[0]), float(raw[1])], dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if not np.all(np.isfinite(intent)):
+            return None
+        magnitude = np.linalg.norm(intent)
+        if magnitude <= 1e-6:
+            return None
+        if magnitude > 1.0:
+            intent /= magnitude
+        return intent
+
+    async def drive_local_gamepad():
+        """Drive directly from a controller plugged into the NUC."""
+        claimed = set()
+        armed = {arm: False for arm in sessions}
+        direction_revision = controls["revision"]
+        try:
+            while True:
+                sticks = gamepad.intents()
+                active = set()
+                busy = cal["busy"] or any(s["restarting"] for s in actions.values())
+                direction_changed = direction_revision != controls["revision"]
+                if direction_changed:
+                    direction_revision = controls["revision"]
+                for arm, sess in sessions.items():
+                    stick = sticks.get(arm)
+                    moving = stick is not None and np.linalg.norm(stick) > 1e-6
+                    if busy or not gamepad.connected or direction_changed:
+                        armed[arm] = False
+                        if arm in claimed:
+                            sess.set_intent(0.0, 0.0, frozen=True)
+                    elif not moving:
+                        # Require each stick to pass through centre after startup,
+                        # reconnect, calibration, or an arm-stack restart.
+                        armed[arm] = True
+                        if arm in claimed:
+                            sess.set_intent(0.0, 0.0, frozen=True)
+                    elif armed[arm]:
+                        active.add(arm)
+                        vx, vy = player_controls(
+                            arm, float(stick[0]), float(stick[1])
+                        )
+                        sess.set_intent(
+                            vx,
+                            vy,
+                            frozen=False,
+                        )
+                    elif arm in claimed:
+                        sess.set_intent(0.0, 0.0, frozen=True)
+                claimed = active
+                local_gamepad_active.clear()
+                local_gamepad_active.update(active)
+                await asyncio.sleep(1 / 50)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            local_gamepad_active.clear()
+            for arm in claimed:
+                sessions[arm].set_intent(0.0, 0.0, frozen=True)
+
     def set_speed_limit(value):
         speed = float(value)
         if not np.isfinite(speed) or not 0.01 <= speed <= 1.0:
@@ -215,21 +300,21 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
             return
         freeze_all()
         state = actions[arm]
-        state.update({"restarting": True, "message": "Restarting server..."})
+        state.update({"restarting": True, "message": "Restarting arm stack..."})
         await broadcast()
         mode = sessions[arm].mode or PLAY
 
         def restart():
             sessions[arm].stop()
-            supervisor.restart_server(arm)
+            supervisor.restart_arm(arm)
             if not sessions[arm].start(mode):
                 raise RuntimeError(sessions[arm].error or "operator failed to restart")
 
         try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, restart)
-            state["message"] = "Server restarted; arm is frozen."
-            print(f"[web] {arm} server restart complete")
+            state["message"] = "Arm stack restarted; controls are frozen."
+            print(f"[web] {arm} arm-stack restart complete")
         except Exception as exc:
             state["message"] = f"Restart failed: {type(exc).__name__}: {exc}"
             print(f"[web] {arm} {state['message']}")
@@ -330,10 +415,16 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                     action_busy = any(s["restarting"] for s in actions.values())
                     arm = cal["arm"]
                     if arm:
+                        if arm in local_gamepad_active:
+                            continue
                         k = resolve_keys(keymap[arm])
                         z = resolve_jog_z_keys(keymap[arm])
-                        vx = float(k["up"] in held) - float(k["down"] in held)
-                        vy = float(k["left"] in held) - float(k["right"] in held)
+                        stick = gamepad_intent(data, arm)
+                        if stick is None:
+                            vx = float(k["up"] in held) - float(k["down"] in held)
+                            vy = float(k["left"] in held) - float(k["right"] in held)
+                        else:
+                            vx, vy = stick
                         vz = float(z["up"] in held) - float(z["down"] in held)
                         sessions[arm].set_intent(
                             vx, vy, vz, frozen=frozen or cal["busy"] or action_busy
@@ -341,9 +432,16 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                     else:
                         home = KEY_HOME in held
                         for a, sess in sessions.items():
+                            if a in local_gamepad_active:
+                                continue
                             k = resolve_keys(keymap[a])
-                            vx = float(k["up"] in held) - float(k["down"] in held)
-                            vy = float(k["left"] in held) - float(k["right"] in held)
+                            stick = gamepad_intent(data, a)
+                            if stick is None:
+                                vx = float(k["up"] in held) - float(k["down"] in held)
+                                vy = float(k["left"] in held) - float(k["right"] in held)
+                            else:
+                                vx, vy = stick
+                            vx, vy = player_controls(a, vx, vy)
                             sess.set_intent(
                                 vx,
                                 vy,
@@ -358,6 +456,12 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
                             set_speed_limit(data.get("speed"))
                         except (TypeError, ValueError) as exc:
                             print(f"[web] rejected speed limit: {exc}")
+                    elif cmd == "same_side_controls":
+                        freeze_all()
+                        controls["same_side"] = bool(data.get("enabled", False))
+                        controls["revision"] += 1
+                        mode = "same-side" if controls["same_side"] else "normal"
+                        print(f"[web] player control layout set to {mode}")
                     elif cmd == "restart_server":
                         await restart_server(data.get("arm"))
                     elif cmd == "calibrate":
@@ -431,11 +535,30 @@ def build_app(sessions, cfg, supervisor=None, camera=None):
     app.router.add_get("/config", config_json)
     app.router.add_get("/video", video)
     app.router.add_get("/ws", ws_handler)
+
+    if gamepad is not None:
+        async def start_gamepad(app):
+            gamepad.start()
+            app["gamepad_task"] = asyncio.create_task(drive_local_gamepad())
+
+        async def stop_gamepad(app):
+            task = app.get("gamepad_task")
+            if task is not None:
+                task.cancel()
+                await task
+            gamepad.stop()
+            gamepad.join(timeout=2)
+
+        app.on_startup.append(start_gamepad)
+        app.on_cleanup.append(stop_gamepad)
     return app
 
 
 def serve(sessions, cfg, supervisor=None, camera=None, port=8080, bind="127.0.0.1"):
-    app = build_app(sessions, cfg, supervisor=supervisor, camera=camera)
+    gamepad = LocalGamepad()
+    app = build_app(
+        sessions, cfg, supervisor=supervisor, camera=camera, gamepad=gamepad
+    )
     print()
     print(f"  Air hockey — open http://{bind}:{port}")
     print(f"  From your laptop:  ssh -L {port}:localhost:{port} franka")

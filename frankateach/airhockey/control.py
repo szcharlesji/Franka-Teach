@@ -7,7 +7,6 @@ import numpy as np
 import zmq
 
 from frankateach.constants import (
-    GRIPPER_CLOSE,
     HOST,
     ROBOT_WORKSPACE_MAX,
     ROBOT_WORKSPACE_MIN,
@@ -119,11 +118,11 @@ def ramp(current, target, accel_time, dt, full_scale):
 class ArmLink:
     """REQ-socket wrapper around one arm's FrankaServer.
 
-    Every command is an absolute EE pose with a fixed orientation and a closed
-    gripper -- the mallet is bolted on and never rotates.
+    Every command is an absolute EE pose with a fixed orientation. Air hockey
+    never controls the gripper, so ``None`` tells FrankaServer to leave it alone.
     """
 
-    def __init__(self, arm, quat=None, gripper=GRIPPER_CLOSE, timeout_ms=5000):
+    def __init__(self, arm, quat=None, gripper=None, timeout_ms=5000):
         self.arm = arm
         self.control_port, self.state_port, self.commanded_port = arm_ports(arm)
         self.socket = create_request_socket(HOST, self.control_port)
