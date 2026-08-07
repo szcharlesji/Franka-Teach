@@ -62,7 +62,10 @@ def test_single_arm():
     server.start()
     server.ready.wait(2)
     sub = ZMQKeypointSubscriber("localhost", arm_ports("right")[1], "robot_state")
-    op = ArmOperator("right", box, CFG, publish=True)
+    telemetry = []
+    op = ArmOperator(
+        "right", box, CFG, publish=True, telemetry_callback=telemetry.append
+    )
     op.start()
 
     check("operator became ready", op.wait_ready(30))
@@ -88,6 +91,18 @@ def test_single_arm():
             break
         time.sleep(0.02)
     check("publishes robot_state for collect_data.py", published is not None)
+    op.set_intent(1.0, 0.0, sequence=23, source_stamp_ns=456)
+    time.sleep(0.06)
+    check(
+        "recording observes the applied intent sequence",
+        bool(telemetry) and telemetry[-1]["intent_sequence"] == 23,
+    )
+    check(
+        "recording observes post-ramp absolute EE targets",
+        bool(telemetry)
+        and len(telemetry[-1]["commanded_pos"]) == 3
+        and len(telemetry[-1]["commanded_box_xy"]) == 2,
+    )
 
     # Drive hard into a corner for 3 s.
     n0 = len(server.commands)

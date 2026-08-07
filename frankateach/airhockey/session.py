@@ -54,10 +54,11 @@ def load_or_provisional(arm, cfg):
 class ArmSession:
     """Owns whichever operator currently drives one arm."""
 
-    def __init__(self, arm, cfg, publish=True):
+    def __init__(self, arm, cfg, publish=True, telemetry_callback=None):
         self.arm = arm
         self.cfg = cfg
         self.publish = publish
+        self.telemetry_callback = telemetry_callback
         self.mode = None
         self.operator = None
         self.box = None
@@ -95,6 +96,7 @@ class ArmSession:
                     # resetting and gliding would move an arm into a play area
                     # nobody has verified. Hold still and wait to be calibrated.
                     reset=not self.provisional,
+                    telemetry_callback=self.telemetry_callback,
                 )
             else:
                 # Never joint-reset into calibration: the arm is already at a

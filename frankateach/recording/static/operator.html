@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Air Hockey Recorder</title>
+<style>
+:root{--bg:#111318;--panel:#1a1e27;--line:#303745;--fg:#e8edf5;--dim:#939baa;--blue:#67b7ff;--green:#63d297;--yellow:#ffc96b;--red:#ff7474}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,monospace}header{display:flex;gap:14px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line)}h1{font-size:16px;color:var(--blue);margin:0}.right{margin-left:auto}.grid{display:grid;grid-template-columns:1fr 1.25fr 1fr;gap:14px;padding:14px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}h2{font-size:12px;color:var(--blue);letter-spacing:.08em;margin:0 0 12px}.row{display:flex;justify-content:space-between;border-bottom:1px solid #242a35;padding:5px 0}.dim{color:var(--dim)}.good{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}button,input{font:inherit;color:var(--fg);background:#242a35;border:1px solid var(--line);border-radius:5px;padding:8px 12px}button{cursor:pointer}button.primary{border-color:var(--blue);color:var(--blue)}button.danger{border-color:var(--red);color:var(--red)}button:disabled{opacity:.35;cursor:not-allowed}input{width:80px}#preview{width:100%;min-height:240px;object-fit:contain;background:#0b0d11;border:1px solid var(--line);border-radius:5px}.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}pre{white-space:pre-wrap;color:var(--dim);font:12px/1.45 ui-monospace,monospace}@media(max-width:1050px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>AIR HOCKEY · RAW RECORDER</h1><span id="link" class="bad">CONNECTING</span><span id="banner" class="right dim">ARMS FROZEN</span><a href="/admin" class="dim">admin</a></header>
+<main class="grid">
+<section class="panel"><h2>LEFT · WASD</h2><div id="left"></div></section>
+<section class="panel"><h2>IPHONE CAPTURE</h2><img id="preview" alt="setup preview"><div class="controls"><label>seconds <input id="duration" type="number" min="1" max="600" step="1" value="20"></label><button id="start" class="primary">START</button><button id="abort" class="danger">ABORT</button><button id="refresh">AIM PREVIEW</button></div><pre id="record"></pre></section>
+<section class="panel"><h2>RIGHT · IJKL</h2><div id="right"></div><h2 style="margin-top:18px">STRICT GATES</h2><div id="gates"></div></section>
+</main>
+<script>
+const held=new Set();let ws=null,released=true,last={};const $=id=>document.getElementById(id);
+const movement=new Set(['KeyW','KeyA','KeyS','KeyD','KeyI','KeyJ','KeyK','KeyL']);
+function send(){if(!ws||ws.readyState!==1)return;const blur=!document.hasFocus();if(blur)held.clear();ws.send(JSON.stringify({t:'keys',held:[...held],frozen:released||blur||held.has('Space'),home:held.has('KeyH'),browser_mono_ms:performance.now()}));}
+addEventListener('keydown',e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName))return;if(movement.has(e.code))released=false;if(e.code==='Escape'){released=true;held.clear()}else held.add(e.code);e.preventDefault();send()});
+addEventListener('keyup',e=>{held.delete(e.code);send()});addEventListener('blur',()=>{held.clear();released=true;send()});setInterval(send,1000/60);
+function armHTML(a){const s=(last.robot&&last.robot.arms&&last.robot.arms[a])||{};return `<div class="row"><span class="dim">state</span><span class="${s.connected?'good':'bad'}">${s.connected?(s.stale?'FROZEN':'LIVE'):'DISCONNECTED'}</span></div><div class="row"><span class="dim">pose</span><span>${(s.pos||[]).map(x=>Number(x).toFixed(3)).join(' ')||'—'}</span></div><div class="row"><span class="dim">rate</span><span class="${Number(s.rate_hz)>=57?'good':'bad'}">${Number(s.rate_hz||0).toFixed(1)} Hz</span></div><div class="row"><span class="dim">calibration</span><span class="${s.provisional?'bad':'good'}">${s.provisional?'PROVISIONAL':'READY'}</span></div>`}
+function render(){for(const a of ['left','right'])$(a).innerHTML=armHTML(a);const p=last.bridge_p99_ms;const rates=last.rates_hz||{};$('gates').innerHTML=`<div class="row"><span class="dim">bridge p99</span><span class="${p!=null&&p<=20?'good':'bad'}">${p==null?'warming':p.toFixed(2)+' ms'}</span></div>${['left','right'].map(a=>`<div class="row"><span class="dim">${a} recent</span><span class="${Number(rates[a])>=57?'good':'bad'}">${Number(rates[a]||0).toFixed(1)} Hz</span></div>`).join('')}<div class="row"><span class="dim">camera</span><span class="${last.camera&&Object.keys(last.camera).length?'good':'bad'}">${last.camera&&Object.keys(last.camera).length?'READY':'NOT READY'}</span></div>`;$('record').textContent=`${last.state||'—'} · ${last.message||''}\n${last.episode||''}\n${last.session_path||''}`;$('start').disabled=!!last.busy;$('abort').disabled=!last.busy||!['preflight','recording'].includes(last.state);$('refresh').disabled=!!last.busy;$('banner').textContent=!document.hasFocus()?'PAGE BLURRED · FROZEN':released?'RELEASED · PRESS MOVEMENT KEY':held.has('Space')?'FROZEN':'CONTROL LIVE';}
+function connect(){ws=new WebSocket(`ws://${location.host}/ws`);ws.onopen=()=>{$('link').textContent='CONNECTED';$('link').className='good'};ws.onclose=()=>{$('link').textContent='DISCONNECTED';$('link').className='bad';released=true;held.clear();setTimeout(connect,1000)};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.t==='status'){last=m;render()}}}connect();
+async function post(path,body={}){const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok)alert(j.error||JSON.stringify(j));return j}
+$('start').onclick=()=>post('/api/start',{duration:Number($('duration').value)});$('abort').onclick=()=>post('/api/abort');$('refresh').onclick=()=>{$('preview').src='/api/preview.jpg?'+Date.now()};setInterval(()=>fetch('/api/status').then(r=>r.json()).then(s=>{last=s;render()}).catch(()=>{}),500);render();
+</script>
+</body></html>

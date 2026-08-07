@@ -1,0 +1,24 @@
+# LEFT arm NUC-side franka-interface configuration for synchronized 60 Hz recording.
+PC:
+  NAME: "nuc"
+  IP: 192.168.100.201
+NUC:
+  NAME: "nuc"
+  IP: 192.168.100.201
+  PUB_PORT: 5566
+  SUB_PORT: 5575
+  GRIPPER_PUB_PORT: 5568
+  GRIPPER_SUB_PORT: 5577
+ROBOT:
+  IP: 192.168.100.202
+CONTROL:
+  STATE_PUBLISHER_RATE: 120
+  POLICY_RATE: 60
+  TRAJ_RATE: 500
+  ZMQ_NOBLOCK: true
+ARM_LOGGER:
+  CONSOLE: {LOGGER_NAME: "arm_logger", LEVEL: "info", USE: true}
+  FILE: {LOGGER_NAME: "/home/robot-lab/charles/Franka-Teach/logs/deoxys_arm_left_60.log", LEVEL: "debug", USE: true}
+GRIPPER_LOGGER:
+  CONSOLE: {LOGGER_NAME: "gripper_logger", LEVEL: "info", USE: true}
+  FILE: {LOGGER_NAME: "/home/robot-lab/charles/Franka-Teach/logs/deoxys_gripper_left_60.log", LEVEL: "debug", USE: true}

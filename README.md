@@ -2,6 +2,9 @@
 
 Bi-Manual Franka 3 robot setup.
 
+For synchronized iPhone 1080p60 air-hockey collection across Discovery and the
+robot NUC, use [RECORDING_RUNBOOK.md](RECORDING_RUNBOOK.md).
+
 
 ## NUC Setup
 
@@ -251,7 +254,7 @@ Tunnel and open `http://localhost:8080` as above.
 | Key | Action |
 |---|---|
 | <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> | left arm (along the table, not the robot base axes) |
-| arrows | right arm |
+| <kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> | right arm |
 | <kbd>H</kbd> | glide both arms back to their box centres |
 | <kbd>Space</kbd> | freeze both arms |
 | <kbd>Esc</kbd> | release control (arms hold position) |
@@ -294,6 +297,7 @@ or a browser (they run against a fake deoxys server):
 python3 tests/test_box.py       # inscribed-rectangle safety property
 python3 tests/test_teleop.py    # control loop, watchdog, two-arm independence
 python3 tests/test_webapp.py    # routes, key protocol, link-loss behaviour
+python3 tests/test_recording.py # synchronized bridge/camera/storage lifecycle
 ```
 
 ### Safety

@@ -30,6 +30,8 @@ class ArmIntent:
     stamp: float = field(default_factory=time.perf_counter)
     home: bool = False
     frozen: bool = False
+    sequence: int = 0
+    source_stamp_ns: int = 0
 
 
 @dataclass
@@ -48,7 +50,16 @@ class ArmStatus:
 
 
 class ArmOperator(threading.Thread):
-    def __init__(self, arm, box, cfg, publish=True, speed=None, reset=True):
+    def __init__(
+        self,
+        arm,
+        box,
+        cfg,
+        publish=True,
+        speed=None,
+        reset=True,
+        telemetry_callback=None,
+    ):
         super().__init__(daemon=True, name=f"arm-{arm}")
         self.arm = arm
         self.box = box
@@ -70,6 +81,10 @@ class ArmOperator(threading.Thread):
         )
         self.z_ff_limit = abs(float(cfg.get("z_feedforward_limit", 0.01)))
         self.publish = publish
+        # Recording observes the control loop here. The callback must be
+        # non-blocking; a false return means its bounded queue overflowed.
+        self.telemetry_callback = telemetry_callback
+        self._telemetry_drops = 0
 
         self.intent = ArmIntent(frozen=True)
         self.status = ArmStatus()
@@ -83,10 +98,24 @@ class ArmOperator(threading.Thread):
         self._cmd_pub = None
 
     # -- called from the input thread --------------------------------------
-    def set_intent(self, vx, vy, frozen=False, home=False):
+    def set_intent(
+        self,
+        vx,
+        vy,
+        frozen=False,
+        home=False,
+        sequence=0,
+        source_stamp_ns=0,
+    ):
         with self._lock:
             self.intent = ArmIntent(
-                vx=vx, vy=vy, stamp=time.perf_counter(), home=home, frozen=frozen
+                vx=vx,
+                vy=vy,
+                stamp=time.perf_counter(),
+                home=home,
+                frozen=frozen,
+                sequence=int(sequence),
+                source_stamp_ns=int(source_stamp_ns),
             )
 
     def set_speed_limit(self, speed):
@@ -177,6 +206,7 @@ class ArmOperator(threading.Thread):
             # read off a HUD -- the instantaneous value swings by tens of Hz.
             mean_period = dt
 
+            tick_sequence = 0
             while not self._stop_event.is_set():
                 with self._lock:
                     intent, speed_limit = self.intent, self.speed
@@ -226,7 +256,9 @@ class ArmOperator(threading.Thread):
                     target[:2] = actual[:2] + delta_xy / dist_xy * self.max_lead
                 target[2] = self.box.z_at(target[:2]) + self._z_lead(vel)
 
+                command_mono_ns = time.perf_counter_ns()
                 state, action = self.link.send_pose(target)
+                state_mono_ns = time.perf_counter_ns()
 
                 if self.publish:
                     state.start_teleop = not (stale or intent.frozen)
@@ -250,6 +282,38 @@ class ArmOperator(threading.Thread):
                         stale=stale or intent.frozen,
                         homing=intent.home,
                     )
+                tick_sequence += 1
+                if self.telemetry_callback is not None:
+                    event = {
+                        "t": "telemetry",
+                        "arm": self.arm,
+                        "tick_sequence": tick_sequence,
+                        "intent_sequence": int(intent.sequence),
+                        "intent_source_mono_ns": int(intent.source_stamp_ns),
+                        "command_mono_ns": command_mono_ns,
+                        "state_mono_ns": state_mono_ns,
+                        "commanded_pos": np.asarray(action.pos, dtype=np.float64).tolist(),
+                        "commanded_box_xy": self.box.to_box(action.pos[:2]).tolist(),
+                        "commanded_box_velocity": self.box.to_box(
+                            self.box.center + vel
+                        ).tolist(),
+                        "measured_pos": pos.tolist(),
+                        "measured_quat": np.asarray(state.quat, dtype=np.float64).tolist(),
+                        "speed": float(np.linalg.norm(vel)),
+                        "rate_hz": 1.0 / mean_period if mean_period > 0 else 0.0,
+                        "connected": True,
+                        "stale": bool(stale),
+                        "frozen": bool(intent.frozen),
+                        "homing": bool(intent.home),
+                        "error": "",
+                        "telemetry_drops": self._telemetry_drops,
+                    }
+                    try:
+                        accepted = self.telemetry_callback(event)
+                    except Exception:
+                        accepted = False
+                    if accepted is False:
+                        self._telemetry_drops += 1
                 limiter.sleep()
         except Exception as exc:  # keep one arm's failure off the other's thread
             with self._lock:

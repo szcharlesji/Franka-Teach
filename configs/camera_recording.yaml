@@ -1,0 +1,27 @@
+# Discovery-side CameraAPI capture profile. Fill in the three manual-control
+# blocks after mounting the phone and measuring the installed lighting.
+capture:
+  camera: back
+  width: 1920
+  height: 1080
+  fps: 60
+  codec: h264
+  audio: false
+  rotationDegrees: 0
+  stabilization: "off"
+  keyFrameInterval: 12
+
+# Start around a 1/500 s shutter (0.002 seconds), then choose an ISO that exposes
+# the table correctly. Null values deliberately block collection until calibrated.
+controls:
+  focus:
+    mode: manual
+    lensPosition: null
+  exposure:
+    mode: manual
+    durationSeconds: 0.002
+    iso: null
+  whiteBalance:
+    mode: manual
+    temperature: null
+    tint: 0

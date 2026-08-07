@@ -57,3 +57,11 @@ could not be used as-is.
 
 Log files are written to this repo's gitignored `logs/`, again to avoid writing
 into the shared tree.
+
+## Recording-specific 60 Hz pair
+
+`franka_left_60.yml` and `franka_right_60.yml` are isolated copies for
+`robot_host.py --profile recording_60`. They match
+`frankateach/configs/deoxys_<arm>_60.yml` and `control_freq=60`. Do not replace
+the 50 Hz files with them: the normal `run.py` workflow remains at its verified
+50 Hz settings for other NUC users.

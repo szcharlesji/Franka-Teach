@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Air Hockey Admin</title>
+<style>
+body{max-width:900px;margin:30px auto;background:#111318;color:#e8edf5;font:14px/1.5 ui-monospace,monospace}
+section{background:#1a1e27;border:1px solid #303745;border-radius:8px;padding:16px;margin:14px 0}
+button,input,select{background:#242a35;color:#e8edf5;border:1px solid #3a4352;border-radius:5px;padding:8px;margin:3px}
+h1,h2,a{color:#67b7ff}pre{white-space:pre-wrap;color:#aab2c0}.warning{color:#ffc96b}
+</style>
+</head>
+<body>
+<a href="/">← operator</a><h1>Robot administration</h1>
+<p class="warning">Every command freezes normal play first. This page owns the keyboard while open: WASD/E/Q jog left; IJKL/O/U jog right. Space or loss of focus freezes.</p>
+<section><h2>Speed and restart</h2>
+<input id="speed" type="number" min="0.01" max="1" step="0.01" value="0.10">
+<button onclick="cmd('speed',{speed:Number(speed.value)})">Set speed</button>
+<button onclick="cmd('restart',{arm:'left'})">Restart left</button>
+<button onclick="cmd('restart',{arm:'right'})">Restart right</button>
+</section>
+<section><h2>Calibration</h2>
+<select id="arm"><option>left</option><option>right</option></select>
+<button onclick="cmd('calibrate',{arm:arm.value})">Enter calibration</button>
+<button onclick="cmd('record_corner')">Record corner</button>
+<button onclick="cmd('undo_corner')">Undo</button>
+<button onclick="cmd('finish_calibration')">Finish & save</button>
+<button onclick="cmd('trace')">Trace</button>
+<button onclick="cmd('play')">Back to play</button>
+</section>
+<pre id="out">Connecting keyboard control…</pre>
+<script>
+const held=new Set();let ws=null,released=true;
+const movement=new Set(['KeyW','KeyA','KeyS','KeyD','KeyI','KeyJ','KeyK','KeyL','KeyE','KeyQ','KeyO','KeyU']);
+function send(){
+  if(!ws||ws.readyState!==1)return;
+  const blur=!document.hasFocus();if(blur)held.clear();
+  ws.send(JSON.stringify({t:'keys',held:[...held],frozen:released||blur||held.has('Space'),home:false,browser_mono_ms:performance.now()}));
+}
+addEventListener('keydown',e=>{
+  if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName))return;
+  if(movement.has(e.code))released=false;
+  if(e.code==='Escape'){released=true;held.clear()}else held.add(e.code);
+  e.preventDefault();send();
+});
+addEventListener('keyup',e=>{held.delete(e.code);send()});
+addEventListener('blur',()=>{held.clear();released=true;send()});
+setInterval(send,1000/60);
+function connect(){
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen=()=>{out.textContent='Keyboard connected; controls start frozen.'};
+  ws.onclose=()=>{released=true;held.clear();out.textContent='Keyboard disconnected; retrying…';setTimeout(connect,1000)};
+}connect();
+async function cmd(command,body={}){
+  if(!confirm(`Freeze controls and run ${command}?`))return;
+  const response=await fetch('/api/admin',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({command,...body})});
+  out.textContent=await response.text();
+}
+</script>
+</body>
+</html>

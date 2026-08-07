@@ -115,7 +115,9 @@ class ArmStack:
         self.with_interface = with_interface
         arm_cfg = (cfg.get("arms") or {}).get(arm) or {}
         self.deoxys_config = arm_cfg.get("deoxys_config", f"deoxys_{arm}_fast.yml")
-        self.nuc_config = NUC_CONFIG_DIR / f"franka_{arm}.yml"
+        self.nuc_config = NUC_CONFIG_DIR / arm_cfg.get(
+            "nuc_config", f"franka_{arm}.yml"
+        )
         self.control_freq = control_freq
         self.num_steps = num_steps
         self.interface = None
@@ -257,6 +259,10 @@ class ArmStack:
             "server": "up" if self.server is not None and self.server.alive else "down",
             "port": self.control_port,
             "port_bound": port_is_bound(self.control_port, HOST),
+            "control_freq": self.control_freq,
+            "num_steps": self.num_steps,
+            "deoxys_config": self.deoxys_config,
+            "nuc_config": str(self.nuc_config),
         }
 
 
