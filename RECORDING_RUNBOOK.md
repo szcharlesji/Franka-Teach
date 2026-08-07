@@ -33,7 +33,7 @@ Python usbmux transport, so it does not need a persistent `iproxy`:
 ```bash
 idevicepair pair
 ~/Camera-API/client/camctl --usbmux status
-~/Camera-API/client/camctl formats --min-fps 60
+~/Camera-API/client/camctl --usbmux formats --min-fps 60
 ```
 
 Discovery also needs `ffmpeg`/`ffprobe`; every clip is decoded and indexed before
@@ -43,11 +43,21 @@ Discovery must already have an SSH alias named `franka` that reaches the robot
 NUC without an interactive password prompt. The launcher adds and monitors the
 port forward itself.
 
-Edit `configs/camera_recording.yaml` on Discovery. Its null lens position, ISO,
-and white-balance temperature deliberately block collection. Use setup preview
-and CameraAPI controls to find repeatable values under the installed lights.
-Start near a 1/500 s shutter (`durationSeconds: 0.002`), then tune ISO. Keep the
-phone fixed, powered, foregrounded, and in Guided Access.
+Edit `configs/camera_recording.yaml` on Discovery. Its null format index, lens
+position, ISO, and white-balance temperature deliberately block collection. Use
+`camctl --usbmux formats --min-fps 60` to select the exact 1920x1080 format
+index, then
+use setup preview and CameraAPI controls to find repeatable values under the
+installed lights. Start near a 1/500 s shutter (`durationSeconds: 0.002`), then
+tune ISO. Keep the phone fixed, powered, foregrounded, and in Guided Access.
+
+The recording profile sets `allowFrameReordering: false` and GOP 12. The former
+makes encoded packet order equal presentation order; the recorder still sorts
+packet PTS defensively and rejects a file whose decode order proves that frame
+reordering occurred. Do not derive `frames.csv` from decoded-frame output:
+the CameraAPI contract documents that ffprobe can omit the final decoded
+picture. Validation decodes the complete video for corruption detection, then
+uses packet PTS and flags for the exact frame index and keyframe checks.
 
 ## Hardware gate before first collection
 
@@ -107,6 +117,13 @@ most 20 ms, both loop rates are at least 57 Hz, both calibrations are real, the
 camera configuration is exact, the phone is thermally healthy, and both devices
 have the configured free-space reserve.
 
+Discovery keeps a persistent CameraAPI SSE connection. A real
+`recording.firstFrame` event with non-null `firstVideoPTSSeconds` is required;
+polling `framesWritten` is not accepted as an event substitute. All server events
+and their Discovery receipt timestamps are retained verbatim. `/status` is also
+polled continuously, including during a clip, so a stopped/interrupted capture
+session or repeated USB failure triggers an early stop and quarantine.
+
 ## Controls and episode behavior
 
 - Left: `WASD`
@@ -138,9 +155,10 @@ phone returns an ID, so the next launch reports prior partial paths and their
 phone recording IDs for recovery review. A verified local raw or rejected copy
 is removed from the phone.
 
-Each episode contains the original MOV, CameraAPI metadata, robot/key NDJSON,
-raw clock samples and fits, an ffprobe-derived frame index, manifest, and SHA-256
-checksums. `manifest.json` declares the future canonical action as:
+Each episode contains the original MOV, CameraAPI configuration, SSE events and
+health samples, robot/key NDJSON, raw clock samples and fits, a packet-PTS frame
+index, manifest, and SHA-256 checksums. `manifest.json` declares the future
+canonical action as:
 
 ```text
 [left commanded box x, left commanded box y,

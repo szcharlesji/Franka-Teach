@@ -1,6 +1,7 @@
 """Run the synchronized iPhone + bimanual air-hockey recorder on Discovery."""
 
 import argparse
+import asyncio
 import signal
 from pathlib import Path
 
@@ -47,6 +48,8 @@ def main():
     )
     tunnel = None
     bridge = None
+    camera = None
+    camera_health_task = None
     try:
         if not args.no_tunnel:
             tunnel = SSHTunnel(
@@ -69,9 +72,14 @@ def main():
         app = build_discovery_app(recorder, bridge, tunnel=tunnel)
 
         async def startup(_):
+            nonlocal camera_health_task
             await bridge.start()
             try:
                 await recorder.prepare_camera()
+                camera_health_task = asyncio.create_task(
+                    recorder.camera_health_loop(),
+                    name="cameraapi-health",
+                )
                 recorder.state = "idle"
                 recorder.message = (
                     "camera and robot bridge ready; waiting for strict gate warm-up"
@@ -86,8 +94,13 @@ def main():
                 recorder.message = str(exc)
 
         async def cleanup(_):
+            if camera_health_task is not None:
+                camera_health_task.cancel()
+                await asyncio.gather(camera_health_task, return_exceptions=True)
             if bridge is not None:
                 await bridge.close()
+            if camera is not None:
+                await asyncio.to_thread(camera.close)
             store.close()
             if tunnel is not None:
                 tunnel.stop()
@@ -112,6 +125,8 @@ def main():
         pass
     finally:
         store.close()
+        if camera is not None:
+            camera.close()
         if tunnel is not None:
             tunnel.stop()
     return 0

@@ -4,7 +4,9 @@ import importlib
 import inspect
 import json
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from frankateach.recording.clock import camera_sample
@@ -15,6 +17,13 @@ class CameraAPIAdapter:
 
     def __init__(self, camera):
         self.camera = camera
+        self._event_condition = threading.Condition()
+        self._event_records = deque(maxlen=10000)
+        self._event_sequence = 0
+        self._event_error = None
+        self._event_thread = None
+        self._event_stop = threading.Event()
+        self._closed = False
 
     @classmethod
     def from_repo(cls, repo_root, usbmux=True):
@@ -115,6 +124,8 @@ class CameraAPIAdapter:
             snake = {
                 "keyFrameInterval": keyframe_name,
                 "rotationDegrees": "rotation_degrees",
+                "formatIndex": "format_index",
+                "allowFrameReordering": "allow_frame_reordering",
             }
             kwargs = {snake.get(key, key): value for key, value in config.items()}
             try:
@@ -188,17 +199,189 @@ class CameraAPIAdapter:
         except AttributeError:
             return self._request("GET", "/files")
 
-    def wait_first_frame(self, recording_id, timeout=8.0):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            active = self.active_recording()
-            if active.get("id") == recording_id and (
-                active.get("firstVideoPTSSeconds") is not None
-                or int(active.get("framesWritten", 0)) > 0
-            ):
-                return active
-            time.sleep(0.02)
-        raise RuntimeError("CameraAPI did not produce a first frame in time")
+    @staticmethod
+    def _json_value(value):
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8")
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    @classmethod
+    def _normalize_event(cls, raw):
+        """Normalize public-client SSE shapes without discarding server fields."""
+        if isinstance(raw, (bytes, bytearray, str)):
+            raw = cls._json_value(raw)
+        if isinstance(raw, tuple) and len(raw) >= 2:
+            event_type, data = raw[0], cls._json_value(raw[1])
+            if isinstance(data, dict):
+                document = dict(data)
+                document.setdefault("type", str(event_type))
+                if "payload" not in document:
+                    document = {"type": str(event_type), "payload": document}
+                return document
+            return {"type": str(event_type), "payload": data}
+        if not isinstance(raw, dict):
+            event_type = getattr(raw, "event", None) or getattr(raw, "type", None)
+            data = cls._json_value(getattr(raw, "data", None))
+            if event_type is not None:
+                return cls._normalize_event((event_type, data))
+            raise RuntimeError(f"unsupported CameraAPI event value: {type(raw).__name__}")
+
+        document = dict(raw)
+        if "data" in document and "payload" not in document:
+            data = cls._json_value(document.pop("data"))
+            if isinstance(data, dict) and data.get("type"):
+                nested = dict(data)
+                nested.setdefault("type", document.get("event"))
+                return nested
+            document["payload"] = data
+        event_type = document.get("type") or document.get("event")
+        if not event_type:
+            raise RuntimeError("CameraAPI event is missing its type")
+        document["type"] = str(event_type)
+        document.pop("event", None)
+        document.setdefault("payload", {})
+        return document
+
+    def _event_method(self):
+        for name in ("events", "iter_events", "event_stream", "watch_events"):
+            method = getattr(self.camera, name, None)
+            if callable(method):
+                return method
+        return None
+
+    def _event_worker(self):
+        while not self._event_stop.is_set():
+            try:
+                source = self._event_method()()
+                if hasattr(source, "__enter__"):
+                    with source as entered:
+                        self._consume_events(entered)
+                else:
+                    self._consume_events(source)
+                if not self._event_stop.wait(0.1):
+                    raise RuntimeError("CameraAPI event stream ended")
+            except Exception as exc:
+                with self._event_condition:
+                    self._event_error = f"{type(exc).__name__}: {exc}"
+                    self._event_condition.notify_all()
+                self._event_stop.wait(0.25)
+
+    def _consume_events(self, source):
+        for raw in source:
+            if self._event_stop.is_set():
+                break
+            document = self._normalize_event(raw)
+            received = time.perf_counter_ns()
+            with self._event_condition:
+                self._event_sequence += 1
+                self._event_records.append(
+                    {
+                        "sequence": self._event_sequence,
+                        "discovery_received_mono_ns": received,
+                        "event": document,
+                    }
+                )
+                self._event_error = None
+                self._event_condition.notify_all()
+
+    def start_event_monitor(self, timeout=5.0):
+        """Start the persistent SSE reader and require its initial hello event."""
+        if self._event_method() is None:
+            raise RuntimeError(
+                "CameraAPI Python client has no SSE event iterator; expected one of "
+                "events(), iter_events(), event_stream(), or watch_events()"
+            )
+        with self._event_condition:
+            if self._event_thread is None or not self._event_thread.is_alive():
+                self._event_stop.clear()
+                self._event_thread = threading.Thread(
+                    target=self._event_worker,
+                    name="cameraapi-events",
+                    daemon=True,
+                )
+                self._event_thread.start()
+            deadline = time.monotonic() + float(timeout)
+            while not self._event_records:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    detail = self._event_error or "no hello event received"
+                    raise RuntimeError(f"CameraAPI SSE stream is unavailable: {detail}")
+                self._event_condition.wait(min(remaining, 0.1))
+        return self.event_cursor()
+
+    def event_cursor(self):
+        with self._event_condition:
+            return self._event_sequence
+
+    def events_since(self, cursor):
+        with self._event_condition:
+            return [
+                dict(record)
+                for record in self._event_records
+                if int(record["sequence"]) > int(cursor)
+            ]
+
+    @property
+    def event_error(self):
+        with self._event_condition:
+            return self._event_error
+
+    def wait_event(self, event_types, cursor, timeout, recording_id=None):
+        wanted = {event_types} if isinstance(event_types, str) else set(event_types)
+        deadline = time.monotonic() + float(timeout)
+        with self._event_condition:
+            while True:
+                for record in self._event_records:
+                    if int(record["sequence"]) <= int(cursor):
+                        continue
+                    event = record["event"]
+                    if event.get("type") not in wanted:
+                        continue
+                    payload = event.get("payload") or {}
+                    if recording_id is not None and payload.get("id") != recording_id:
+                        continue
+                    return dict(record)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    detail = f"; last SSE error: {self._event_error}" if self._event_error else ""
+                    names = ", ".join(sorted(wanted))
+                    raise RuntimeError(f"CameraAPI event timeout waiting for {names}{detail}")
+                self._event_condition.wait(min(remaining, 0.1))
+
+    def wait_first_frame_event(self, recording_id, cursor, timeout=8.0):
+        record = self.wait_event(
+            "recording.firstFrame",
+            cursor,
+            timeout,
+            recording_id=recording_id,
+        )
+        payload = record["event"].get("payload") or {}
+        if payload.get("firstVideoPTSSeconds") is None:
+            raise RuntimeError(
+                "recording.firstFrame did not contain firstVideoPTSSeconds"
+            )
+        return record
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._event_stop.set()
+        with self._event_condition:
+            self._event_condition.notify_all()
+        close = getattr(self.camera, "close", None)
+        if callable(close):
+            close()
+        if (
+            self._event_thread is not None
+            and self._event_thread is not threading.current_thread()
+        ):
+            self._event_thread.join(timeout=1.0)
 
     def wait_finished(self, recording_id, timeout):
         deadline = time.monotonic() + timeout

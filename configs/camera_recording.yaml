@@ -2,6 +2,8 @@
 # blocks after mounting the phone and measuring the installed lighting.
 capture:
   camera: back
+  # Device-specific index from: camctl formats --min-fps 60
+  formatIndex: null
   width: 1920
   height: 1080
   fps: 60
@@ -10,6 +12,9 @@ capture:
   rotationDegrees: 0
   stabilization: "off"
   keyFrameInterval: 12
+  # Keeps encoded packet order equal to presentation order. Validation sorts PTS
+  # defensively but rejects an episode if it detects reordered packets.
+  allowFrameReordering: false
 
 # Start around a 1/500 s shutter (0.002 seconds), then choose an ISO that exposes
 # the table correctly. Null values deliberately block collection until calibrated.

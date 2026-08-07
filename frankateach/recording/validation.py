@@ -29,6 +29,26 @@ class ValidationReport:
 
 
 def probe_video(path):
+    decode = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if decode.returncode:
+        raise RuntimeError(decode.stderr.strip() or "ffmpeg decode failed")
+
     command = [
         "ffprobe",
         "-v",
@@ -36,10 +56,10 @@ def probe_video(path):
         "-select_streams",
         "v:0",
         "-show_streams",
-        "-show_frames",
+        "-show_packets",
         "-show_entries",
         "stream=codec_name,width,height,avg_frame_rate,duration,nb_frames:"
-        "frame=best_effort_timestamp_time,key_frame",
+        "packet=pts_time,flags",
         "-of",
         "json",
         str(path),
@@ -51,17 +71,19 @@ def probe_video(path):
     streams = document.get("streams") or []
     if not streams:
         raise RuntimeError("ffprobe found no video stream")
-    frames = []
-    for raw in document.get("frames") or []:
-        pts = raw.get("best_effort_timestamp_time")
+    packets = []
+    for decode_order, raw in enumerate(document.get("packets") or []):
+        pts = raw.get("pts_time")
         if pts is not None:
-            frames.append(
+            packets.append(
                 {
                     "pts_seconds": float(pts),
-                    "key_frame": bool(int(raw.get("key_frame", 0))),
+                    "key_frame": "K" in str(raw.get("flags", "")),
+                    "decode_order": decode_order,
                 }
             )
-    return streams[0], frames
+    packets.sort(key=lambda packet: packet["pts_seconds"])
+    return streams[0], packets
 
 
 def _metadata_timing(camera):
@@ -80,6 +102,7 @@ def validate_episode(
     expected_height=1080,
     expected_fps=60.0,
     expected_gop=12,
+    expected_frame_reordering=False,
     minimum_robot_hz=57.0,
     maximum_gap_ms=50.0,
     maximum_sync_ms=2.0,
@@ -116,6 +139,13 @@ def validate_episode(
         return report, []
 
     report.details["video_frame_count"] = len(frames)
+    decode_order = [
+        int(frame.get("decode_order", index)) for index, frame in enumerate(frames)
+    ]
+    reordered = decode_order != sorted(decode_order)
+    report.details["video_frame_reordering"] = reordered
+    if reordered and not expected_frame_reordering:
+        report.fail("video_frame_reordering")
     if int(stream.get("width", 0)) != expected_width or int(
         stream.get("height", 0)
     ) != expected_height:

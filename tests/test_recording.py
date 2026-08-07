@@ -1,6 +1,8 @@
 """Hardware-free tests for synchronized raw recording infrastructure."""
 
 import asyncio
+import json
+import queue
 import tempfile
 import time
 from collections import deque
@@ -13,11 +15,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from frankateach.recording import recorder as recorder_module
 from frankateach.recording import validation as validation_module
 from frankateach.recording.bridge import RobotBridge, TelemetryHub
+from frankateach.recording.camera import CameraAPIAdapter
 from frankateach.recording.clock import ClockSample, fit_clock
 from frankateach.recording.ownership import ArmOwnership
 from frankateach.recording.protocol import PROTOCOL_VERSION, validate_keys
 from frankateach.recording.profile import apply_recording_profile, validate_recording_profile
-from frankateach.recording.recorder import EpisodeRecorder
+from frankateach.recording.recorder import EpisodeRecorder, recorded_dimensions
 from frankateach.recording.storage import SessionStore
 from frankateach.recording.validation import ValidationReport, validate_episode
 from tests.fake_camera_api import FakeCameraAPI
@@ -58,6 +61,13 @@ def test_clock_and_protocol():
     )
     check("recording profile selects 60 Hz", profile["control_hz"] == 60)
     check("recording profile configs agree", validate_recording_profile(profile))
+    check(
+        "quarter-turn camera rotation swaps recorded dimensions",
+        recorded_dimensions(
+            {"width": 1920, "height": 1080, "rotationDegrees": 90}
+        )
+        == (1080, 1920),
+    )
     with tempfile.TemporaryDirectory() as temporary:
         first_owner = ArmOwnership(["left"], lock_root=temporary).acquire()
         try:
@@ -143,6 +153,17 @@ def test_strict_validation():
         )
         check("strict validator accepts a complete episode", report.accepted)
         check("strict validator maps every frame", len(index) == 60)
+        frames[0]["decode_order"] = 1
+        frames[1]["decode_order"] = 0
+        report, _ = validate_episode(
+            "unused.mov", camera, telemetry, fit, fit, expected_duration=1.0
+        )
+        check(
+            "strict validator rejects frame reordering",
+            "video_frame_reordering" in report.failures,
+        )
+        frames[0].pop("decode_order")
+        frames[1].pop("decode_order")
         camera["timing"]["captureDrops"] = 1
         camera["timing"]["interruptions"] = [{"reason": "test"}]
         report, _ = validate_episode(
@@ -158,6 +179,127 @@ def test_strict_validation():
         )
     finally:
         validation_module.probe_video = original_probe
+
+
+def test_packet_probe():
+    calls = []
+    original_run = validation_module.subprocess.run
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[0] == "ffmpeg":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout="""{
+  "streams": [{"codec_name":"h264","width":1920,"height":1080,"avg_frame_rate":"60/1"}],
+  "packets": [
+    {"pts_time":"0.033333","flags":"___"},
+    {"pts_time":"0.000000","flags":"K__"},
+    {"pts_time":"0.016667","flags":"___"}
+  ]
+}""",
+        )
+
+    validation_module.subprocess.run = fake_run
+    try:
+        _, packets = validation_module.probe_video("unused.mov")
+    finally:
+        validation_module.subprocess.run = original_run
+    check("video validation performs a real decode", calls[0][0] == "ffmpeg")
+    check("frame indexing reads packets", "-show_packets" in calls[1])
+    check(
+        "packet PTS are sorted into presentation order",
+        packets[0]["pts_seconds"] == 0,
+    )
+    check(
+        "packet probe retains original decode order",
+        [packet["decode_order"] for packet in packets] == [1, 2, 0],
+    )
+    check("packet flags preserve keyframes", packets[0]["key_frame"])
+
+
+def test_camera_adapter_contract():
+    class DocumentedClient:
+        def __init__(self):
+            self.event_queue = queue.Queue()
+            self.configure_args = None
+
+        def configure(
+            self,
+            *,
+            format_index=None,
+            key_frame_interval=None,
+            rotation_degrees=None,
+            allow_frame_reordering=None,
+            **kwargs,
+        ):
+            self.configure_args = {
+                "format_index": format_index,
+                "key_frame_interval": key_frame_interval,
+                "rotation_degrees": rotation_degrees,
+                "allow_frame_reordering": allow_frame_reordering,
+                **kwargs,
+            }
+            return self.configure_args
+
+        def events(self):
+            yield {
+                "type": "hello",
+                "timestamp": "2000-01-01T00:00:00Z",
+                "payload": {},
+            }
+            while True:
+                event = self.event_queue.get()
+                if event is None:
+                    return
+                yield event
+
+        def close(self):
+            self.event_queue.put(None)
+
+    client = DocumentedClient()
+    adapter = CameraAPIAdapter(client)
+    adapter.start_event_monitor()
+    cursor = adapter.event_cursor()
+    configured = adapter.configure(
+        {
+            "formatIndex": 12,
+            "keyFrameInterval": 12,
+            "rotationDegrees": 90,
+            "allowFrameReordering": False,
+            "fps": 60,
+        }
+    )
+    check("adapter maps exact format index", configured["format_index"] == 12)
+    check(
+        "adapter maps frame-reordering control",
+        configured["allow_frame_reordering"] is False,
+    )
+    client.event_queue.put(
+        (
+            "recording.firstFrame",
+            {
+                "type": "recording.firstFrame",
+                "timestamp": "2000-01-01T00:00:01Z",
+                "payload": {
+                    "id": "recording-1",
+                    "firstVideoPTSSeconds": 123.5,
+                },
+            },
+        )
+    )
+    event = adapter.wait_first_frame_event("recording-1", cursor, timeout=1)
+    check(
+        "adapter waits for real first-frame SSE",
+        event["event"]["payload"]["firstVideoPTSSeconds"] == 123.5,
+    )
+    check(
+        "adapter timestamps SSE receipt on Discovery",
+        event["discovery_received_mono_ns"] > 0,
+    )
+    adapter.close()
 
 
 class FakeSession:
@@ -350,11 +492,13 @@ async def test_episode_lifecycle():
         profile = root / "camera.yaml"
         profile.write_text(
             """capture:
+  formatIndex: 12
   width: 1920
   height: 1080
   fps: 60
   codec: h264
   keyFrameInterval: 12
+  allowFrameReordering: false
   audio: false
   stabilization: "off"
   rotationDegrees: 0
@@ -416,6 +560,21 @@ controls:
         path = Path(result["path"])
         check("raw episode has manifest", (path / "manifest.json").is_file())
         check("raw episode has checksums", (path / "checksums.sha256").is_file())
+        camera_document = json.loads(
+            (path / "camera.json").read_text(encoding="utf-8")
+        )
+        event_types = [row["event"]["type"] for row in camera_document["events"]]
+        check(
+            "camera events are retained verbatim",
+            event_types
+            == [
+                "recording.started",
+                "recording.firstFrame",
+                "recording.autostopped",
+                "recording.stopped",
+            ],
+        )
+        check("camera health is sampled during capture", bool(camera_document["health"]))
         check("phone file deleted after verification", camera.deleted == [camera.recording_id])
         check("partial directory is empty", not any(store.partial_dir.iterdir()))
 
@@ -474,6 +633,8 @@ controls:
 async def main():
     test_clock_and_protocol()
     test_strict_validation()
+    test_packet_probe()
+    test_camera_adapter_contract()
     await test_robot_bridge()
     await test_episode_lifecycle()
     print("\nFAILED:", ", ".join(fails) if fails else "none")

@@ -20,6 +20,14 @@ class PreflightError(RuntimeError):
     pass
 
 
+def recorded_dimensions(capture):
+    width = int(capture["width"])
+    height = int(capture["height"])
+    if int(capture.get("rotationDegrees", 0)) in {90, 270}:
+        return height, width
+    return width, height
+
+
 def load_camera_profile(path):
     with Path(path).expanduser().open(encoding="utf-8") as stream:
         profile = yaml.safe_load(stream) or {}
@@ -32,12 +40,22 @@ def load_camera_profile(path):
         "fps": 60,
         "codec": "h264",
         "keyFrameInterval": 12,
+        "allowFrameReordering": False,
         "audio": False,
         "stabilization": "off",
     }
     for field, expected in required_capture.items():
         if capture.get(field) != expected:
             missing.append(f"capture.{field} must be {expected!r}")
+    format_index = capture.get("formatIndex")
+    if (
+        isinstance(format_index, bool)
+        or not isinstance(format_index, int)
+        or format_index < 0
+    ):
+        missing.append("capture.formatIndex must be a non-negative integer from /formats")
+    if capture.get("rotationDegrees", 0) not in {0, 90, 180, 270}:
+        missing.append("capture.rotationDegrees must be 0, 90, 180, or 270")
     for group, fields in {
         "focus": ("lensPosition",),
         "exposure": ("durationSeconds", "iso"),
@@ -117,6 +135,7 @@ class EpisodeRecorder:
         self.message = ""
         self.current_episode = None
         self.camera_status = {}
+        self.camera_health_error = None
         self.applied_capture = {}
         self.applied_controls = {}
         self.last_result = None
@@ -143,14 +162,33 @@ class EpisodeRecorder:
     async def prepare_camera(self):
         profile = load_camera_profile(self.camera_profile_path)
         await asyncio.to_thread(self.camera.wait_until_ready)
+        await asyncio.to_thread(self.camera.start_event_monitor)
         self.applied_capture = await asyncio.to_thread(
             self.camera.configure, profile["capture"]
         )
         self.applied_controls = await asyncio.to_thread(
             self.camera.control, profile["controls"]
         )
-        self.camera_status = await asyncio.to_thread(self.camera.status)
+        await self.refresh_camera_status()
         return self.camera_status
+
+    async def refresh_camera_status(self):
+        try:
+            status = await asyncio.to_thread(self.camera.status)
+        except Exception as exc:
+            self.camera_health_error = f"{type(exc).__name__}: {exc}"
+            raise
+        self.camera_status = status
+        self.camera_health_error = None
+        return status
+
+    async def camera_health_loop(self, interval=1.0):
+        while True:
+            try:
+                await self.refresh_camera_status()
+            except Exception:
+                pass
+            await asyncio.sleep(interval)
 
     def _recent_by_arm(self, seconds=5.0):
         cutoff = time.perf_counter_ns() - int(seconds * 1e9)
@@ -185,6 +223,8 @@ class EpisodeRecorder:
             "rates_hz": self._rates(),
             "robot": self.bridge.status,
             "camera": self.camera_status,
+            "camera_error": self.camera_health_error,
+            "camera_event_error": getattr(self.camera, "event_error", None),
             "last_result": self.last_result,
             "orphan_partials": self.orphan_partials,
         }
@@ -229,7 +269,14 @@ class EpisodeRecorder:
             )
 
         profile = load_camera_profile(self.camera_profile_path)
-        self.camera_status = await asyncio.to_thread(self.camera.status)
+        event_error = getattr(self.camera, "event_error", None)
+        if event_error:
+            failures.append(f"CameraAPI SSE stream failed: {event_error}")
+        try:
+            self.camera_status = await self.refresh_camera_status()
+        except Exception as exc:
+            failures.append(f"CameraAPI health check failed: {type(exc).__name__}: {exc}")
+            self.camera_status = {}
         camera_files = await asyncio.to_thread(self.camera.files)
         phone_free = int(camera_files.get("freeDiskBytes", 0) or 0)
         if phone_free < 2 * 1024**3:
@@ -260,14 +307,21 @@ class EpisodeRecorder:
             "height": 1080,
             "fps": 60,
             "codec": "h264",
-            "keyFrameInterval": 12,
+            "formatIndex": profile["capture"]["formatIndex"],
             "audioEnabled": False,
             "stabilization": "off",
             "rotationDegrees": profile["capture"].get("rotationDegrees", 0),
         }
         for field, expected in expected_capture.items():
             actual = capture.get(field)
-            if str(actual).lower() != str(expected).lower():
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                try:
+                    matches = abs(float(actual) - float(expected)) <= 1e-6
+                except (TypeError, ValueError):
+                    matches = False
+            else:
+                matches = str(actual).lower() == str(expected).lower()
+            if not matches:
                 failures.append(f"camera {field}={actual!r}, expected {expected!r}")
         applied_controls = self.applied_controls.get("controls") or self.applied_controls
         expected_controls = {
@@ -346,24 +400,78 @@ class EpisodeRecorder:
 
     async def _wait_camera(self, recording_id, duration, automatic_failures):
         deadline = time.monotonic() + duration + 40.0
+        next_health = 0.0
+        health_failures = 0
+        health_samples = []
         while time.monotonic() < deadline:
             if self.abort_event.is_set():
-                return "abort", await asyncio.to_thread(self.camera.stop_recording)
+                finished = await asyncio.to_thread(self.camera.stop_recording)
+                return "abort", finished, health_samples
             if not self.bridge.connected and "bridge_disconnected" not in automatic_failures:
                 automatic_failures.append("bridge_disconnected")
                 try:
-                    return "failed", await asyncio.to_thread(self.camera.stop_recording)
+                    finished = await asyncio.to_thread(self.camera.stop_recording)
+                    return "failed", finished, health_samples
                 except Exception:
                     pass
+
+            now = time.monotonic()
+            if now >= next_health:
+                sample = {"discovery_mono_ns": time.perf_counter_ns()}
+                try:
+                    status = await self.refresh_camera_status()
+                    sample["status"] = status
+                    health_failures = 0
+                    session = status.get("session") or {}
+                    device = status.get("device") or {}
+                    stop_reason = None
+                    if not session.get("running", False):
+                        stop_reason = "camera_session_not_running"
+                    elif session.get("interrupted", False):
+                        stop_reason = "camera_interrupted"
+                    thermal = str(device.get("thermalState", "nominal")).lower()
+                    if thermal in {"serious", "critical"}:
+                        reason = f"camera_thermal_{thermal}"
+                        if reason not in automatic_failures:
+                            automatic_failures.append(reason)
+                    event_error = getattr(self.camera, "event_error", None)
+                    if event_error and "camera_event_stream" not in automatic_failures:
+                        automatic_failures.append("camera_event_stream")
+                        sample["event_error"] = event_error
+                    if stop_reason is not None:
+                        if stop_reason not in automatic_failures:
+                            automatic_failures.append(stop_reason)
+                        health_samples.append(sample)
+                        try:
+                            finished = await asyncio.to_thread(self.camera.stop_recording)
+                            return "failed", finished, health_samples
+                        except Exception as exc:
+                            sample["stop_error"] = f"{type(exc).__name__}: {exc}"
+                except Exception as exc:
+                    health_failures += 1
+                    sample["error"] = f"{type(exc).__name__}: {exc}"
+                    if health_failures >= 3 and "camera_disconnected" not in automatic_failures:
+                        automatic_failures.append("camera_disconnected")
+                        try:
+                            finished = await asyncio.to_thread(self.camera.stop_recording)
+                            health_samples.append(sample)
+                            return "failed", finished, health_samples
+                        except Exception as stop_exc:
+                            sample["stop_error"] = (
+                                f"{type(stop_exc).__name__}: {stop_exc}"
+                            )
+                health_samples.append(sample)
+                next_health = now + 0.25
             try:
                 info = await asyncio.to_thread(self.camera.file_info, recording_id)
                 if info and info.get("filename"):
-                    return "complete", info
+                    return "complete", info, health_samples
             except Exception:
                 pass
             await asyncio.sleep(0.05)
         automatic_failures.append("camera_finalize_timeout")
-        return "failed", await asyncio.to_thread(self.camera.stop_recording)
+        finished = await asyncio.to_thread(self.camera.stop_recording)
+        return "failed", finished, health_samples
 
     async def _run(self, duration):
         self.state = "preflight"
@@ -410,18 +518,22 @@ class EpisodeRecorder:
         try:
             self.state = "recording"
             self.message = "starting CameraAPI recording"
+            camera_event_cursor = self.camera.event_cursor()
             camera_start = await asyncio.to_thread(
                 self.camera.start_recording, writer.episode_id, duration
             )
             camera_start_received_ns = time.perf_counter_ns()
             writer.write_json("camera_start.json", camera_start)
             recording_id = camera_start["id"]
-            first_frame = await asyncio.to_thread(
-                self.camera.wait_first_frame, recording_id, 8.0
+            first_frame_event = await asyncio.to_thread(
+                self.camera.wait_first_frame_event,
+                recording_id,
+                camera_event_cursor,
+                8.0,
             )
-            first_frame_received_ns = time.perf_counter_ns()
+            first_frame = first_frame_event["event"]["payload"]
             self.message = "recording fixed-duration clip"
-            outcome, finished = await self._wait_camera(
+            outcome, finished, camera_health = await self._wait_camera(
                 recording_id, duration, automatic_failures
             )
             finished_received_ns = time.perf_counter_ns()
@@ -455,6 +567,23 @@ class EpisodeRecorder:
                     "phone_delete_error": phone_delete_error,
                 }
                 return self.last_result
+
+            try:
+                await asyncio.to_thread(
+                    self.camera.wait_event,
+                    "recording.stopped",
+                    camera_event_cursor,
+                    2.0,
+                    recording_id,
+                )
+            except Exception:
+                automatic_failures.append("camera_stopped_event_missing")
+            camera_events = self.camera.events_since(camera_event_cursor)
+            event_types = [record["event"].get("type") for record in camera_events]
+            if "recording.started" not in event_types:
+                automatic_failures.append("camera_started_event_missing")
+            if "recording.firstFrame" not in event_types:
+                automatic_failures.append("camera_first_frame_event_missing")
 
             self.state = "finalizing"
             self.message = "capturing post-roll and clock samples"
@@ -500,23 +629,12 @@ class EpisodeRecorder:
                 "start": camera_start,
                 "first_frame": first_frame,
                 "finished": finished,
-                "events": [
-                    {
-                        "type": "recording.started",
-                        "discovery_received_mono_ns": camera_start_received_ns,
-                        "payload": camera_start,
-                    },
-                    {
-                        "type": "recording.firstFrame",
-                        "discovery_received_mono_ns": first_frame_received_ns,
-                        "payload": first_frame,
-                    },
-                    {
-                        "type": "recording.stopped",
-                        "discovery_received_mono_ns": finished_received_ns,
-                        "payload": finished,
-                    },
-                ],
+                "http_receipts": {
+                    "record_start_discovery_mono_ns": camera_start_received_ns,
+                    "record_finished_discovery_mono_ns": finished_received_ns,
+                },
+                "events": camera_events,
+                "health": camera_health,
             }
             writer.write_json("camera.json", camera_document)
             (writer.path / "camera_start.json").unlink(missing_ok=True)
@@ -525,6 +643,8 @@ class EpisodeRecorder:
             video_path = writer.path / "video.mov"
             await asyncio.to_thread(self.camera.download, recording_id, video_path)
             size_matches = video_path.stat().st_size == int(finished.get("sizeBytes", -1))
+            capture_profile = preflight["profile"]["capture"]
+            output_width, output_height = recorded_dimensions(capture_profile)
             report, frame_index = await asyncio.to_thread(
                 validate_episode,
                 video_path,
@@ -539,6 +659,10 @@ class EpisodeRecorder:
                 camera_fit,
                 nuc_fit,
                 expected_duration=duration,
+                expected_width=output_width,
+                expected_height=output_height,
+                expected_fps=float(capture_profile["fps"]),
+                expected_gop=int(capture_profile["keyFrameInterval"]),
             )
             if not size_matches:
                 report.fail("download_size")
