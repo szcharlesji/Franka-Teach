@@ -10,6 +10,21 @@ import numpy as np
 
 from frankateach.recording.clock import ClockFit, percentile_ns
 
+# How far the *measured* average frame rate may sit from the nominal one. Sensor
+# oscillators are specified in tens-to-hundreds of ppm, not the 167 ppm that a
+# +/-0.01 fps window on 60 fps allows, so this is a physical bound rather than an
+# arithmetic one. 0.25 fps still rejects a camera that quietly fell to 30 or 50.
+MEASURED_FPS_TOLERANCE = 0.25
+
+
+def _rational(value):
+    """Parse an ffprobe 'num/den' rate. Returns 0.0 when absent or degenerate."""
+    try:
+        numerator, denominator = str(value).split("/", 1)
+        return float(numerator) / float(denominator)
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
 
 @dataclass
 class ValidationReport:
@@ -58,7 +73,7 @@ def probe_video(path):
         "-show_streams",
         "-show_packets",
         "-show_entries",
-        "stream=codec_name,width,height,avg_frame_rate,duration,nb_frames:"
+        "stream=codec_name,width,height,avg_frame_rate,r_frame_rate,duration,nb_frames:"
         "packet=pts_time,flags",
         "-of",
         "json",
@@ -152,15 +167,22 @@ def validate_episode(
         report.fail("video_resolution")
     if stream.get("codec_name") != "h264":
         report.fail("video_codec")
-    try:
-        numerator, denominator = str(stream.get("avg_frame_rate", "0/1")).split(
-            "/", 1
-        )
-        video_fps = float(numerator) / float(denominator)
-    except (TypeError, ValueError, ZeroDivisionError):
-        video_fps = 0.0
+    # avg_frame_rate is measured — frame count over track duration — so it carries
+    # the sensor's real oscillator drift, a few hundred ppm off nominal on real
+    # hardware. Give it a physical tolerance rather than an arithmetic one.
+    #
+    # The exact nominal rate is already enforced above as camera_fps, against the
+    # device's own configuration. Do not gate on r_frame_rate: ffprobe derives it
+    # by looking for the coarsest timebase that represents every timestamp, which
+    # is stable only while the container timescale is coarse enough to quantise
+    # the jitter away. It is recorded here as a diagnostic and nothing more.
+    #
+    # Dropped frames are not this check's job — video_frame_gap, video_duration
+    # and the framesWritten comparison cover them.
+    report.details["video_nominal_fps"] = _rational(stream.get("r_frame_rate"))
+    video_fps = _rational(stream.get("avg_frame_rate"))
     report.details["video_fps"] = video_fps
-    if abs(video_fps - expected_fps) > 0.01:
+    if abs(video_fps - expected_fps) > MEASURED_FPS_TOLERANCE:
         report.fail("video_fps")
     pts = np.asarray([frame["pts_seconds"] for frame in frames], dtype=np.float64)
     if len(pts) < 2 or np.any(np.diff(pts) <= 0):
@@ -248,5 +270,77 @@ def write_frame_index(path, rows):
             stream,
             fieldnames=["frame", "file_pts_seconds", "camera_pts_seconds", "discovery_mono_ns"],
         )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+# Per-arm quantities resampled onto video frames. commanded_box_xy is the
+# canonical action; the rest is carried so a consumer never has to re-derive an
+# aligned quantity by hand and get the pairing wrong.
+ACTION_FIELDS = (
+    ("commanded_box_xy", ("box_x", "box_y")),
+    ("commanded_pos", ("cmd_x", "cmd_y", "cmd_z")),
+    ("measured_pos", ("meas_x", "meas_y", "meas_z")),
+    ("speed", ("speed",)),
+)
+
+
+def build_action_index(frame_index, by_arm, nuc_fit, arms=("left", "right")):
+    """Resample the robot stream onto video frame timestamps by interpolation.
+
+    The camera and the control loop are independent oscillators -- 59.975 Hz and
+    59.54 Hz on the reference rig -- so they beat with a ~2.3 s period and no
+    fixed frame/tick pairing exists. Taking the nearest telemetry sample costs a
+    median 4.1 ms and up to 8.6 ms of skew, which at 0.58 m/s is 4.6 mm of pose
+    error; pairing by list index is worse still, drifting a full frame every
+    2.3 s. Linear interpolation onto the frame's own timestamp removes both.
+
+    Telemetry is timestamped on the NUC clock, so it goes through nuc_fit to
+    reach the Discovery timeline that frames.csv already uses. Recording keeps
+    ~1 s of pre- and post-roll for exactly this reason; a frame outside the
+    telemetry span is still emitted, but clamped and flagged `extrapolated`.
+    """
+    if not frame_index:
+        return []
+    series = {}
+    for arm in arms:
+        rows = list(by_arm.get(arm) or [])
+        if len(rows) < 2:
+            return []
+        t = np.asarray([nuc_fit.map_ns(int(r["state_mono_ns"])) for r in rows], dtype=np.float64)
+        order = np.argsort(t, kind="stable")
+        columns = {}
+        for source, names in ACTION_FIELDS:
+            values = np.asarray([r[source] for r in rows], dtype=np.float64).reshape(len(rows), -1)
+            for axis, name in enumerate(names):
+                columns[name] = values[order, axis]
+        series[arm] = (t[order], columns)
+
+    frame_ns = np.asarray([row["discovery_mono_ns"] for row in frame_index], dtype=np.float64)
+    out = [
+        {"frame": row["frame"], "discovery_mono_ns": row["discovery_mono_ns"]}
+        for row in frame_index
+    ]
+    for arm in arms:
+        t, columns = series[arm]
+        for name, values in columns.items():
+            resampled = np.interp(frame_ns, t, values)
+            for record, value in zip(out, resampled):
+                record[f"{arm}_{name}"] = float(value)
+        # Distance to the nearer bracketing sample: how far the value was carried.
+        index = np.clip(np.searchsorted(t, frame_ns), 1, len(t) - 1)
+        gap = np.minimum(np.abs(frame_ns - t[index - 1]), np.abs(frame_ns - t[index])) / 1e6
+        outside = (frame_ns < t[0]) | (frame_ns > t[-1])
+        for record, value, flag in zip(out, gap, outside):
+            record[f"{arm}_interp_gap_ms"] = round(float(value), 6)
+            record[f"{arm}_extrapolated"] = int(flag)
+    return out
+
+
+def write_action_index(path, rows):
+    if not rows:
+        return
+    with Path(path).open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)

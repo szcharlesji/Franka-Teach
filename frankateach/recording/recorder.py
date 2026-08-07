@@ -13,7 +13,12 @@ import yaml
 from frankateach.recording.clock import fit_clock, percentile_ns
 from frankateach.recording.protocol import SCHEMA_VERSION
 from frankateach.recording.storage import sha256_file, utc_now, write_checksums
-from frankateach.recording.validation import validate_episode, write_frame_index
+from frankateach.recording.validation import (
+    build_action_index,
+    validate_episode,
+    write_action_index,
+    write_frame_index,
+)
 
 
 class PreflightError(RuntimeError):
@@ -26,6 +31,38 @@ def recorded_dimensions(capture):
     if int(capture.get("rotationDegrees", 0)) in {90, 270}:
         return height, width
     return width, height
+
+
+# CameraAPI's request vocabulary is not its status vocabulary. A request mode is
+# one of auto/single/locked/manual, but /status reports the AVFoundation enum the
+# device actually landed in, and only AVCaptureDevice.ExposureMode has a custom
+# case. Pinning a lens position or a white-balance temperature therefore reads
+# back as "locked", not "manual" — see CaptureController.name(for:). The pinned
+# values themselves are still checked field by field below, so accepting "locked"
+# here does not accept a lens locked at the wrong place.
+REPORTED_CONTROL_MODE = {
+    "focus": {"manual": "locked", "single": "locked", "locked": "locked", "auto": "auto"},
+    "exposure": {"manual": "manual", "single": "locked", "locked": "locked", "auto": "auto"},
+    "whiteBalance": {
+        "manual": "locked",
+        "single": "locked",
+        "locked": "locked",
+        "auto": "auto",
+    },
+}
+
+# Absolute tolerance floors for the numeric controls. The 1% relative tolerance
+# used elsewhere degenerates to nothing when the requested value is 0, and tint
+# is requested as exactly 0: the device stores white balance as RGB gains, so a
+# {temperature, tint} pair round-trips through deviceWhiteBalanceGains(for:) and
+# comes back off by ~0.01 tint units out of a -150..150 range.
+CONTROL_TOLERANCE = {
+    "tint": 1.0,
+    "temperature": 25.0,
+    "lensPosition": 1e-3,
+    "exposureDurationSeconds": 5e-6,
+    "iso": 1.0,
+}
 
 
 def load_camera_profile(path):
@@ -325,21 +362,28 @@ class EpisodeRecorder:
                 failures.append(f"camera {field}={actual!r}, expected {expected!r}")
         applied_controls = self.applied_controls.get("controls") or self.applied_controls
         expected_controls = {
-            "focusMode": profile["controls"]["focus"]["mode"],
+            "focusMode": REPORTED_CONTROL_MODE["focus"][
+                profile["controls"]["focus"]["mode"]
+            ],
             "lensPosition": profile["controls"]["focus"]["lensPosition"],
-            "exposureMode": profile["controls"]["exposure"]["mode"],
+            "exposureMode": REPORTED_CONTROL_MODE["exposure"][
+                profile["controls"]["exposure"]["mode"]
+            ],
             "exposureDurationSeconds": profile["controls"]["exposure"][
                 "durationSeconds"
             ],
             "iso": profile["controls"]["exposure"]["iso"],
-            "whiteBalanceMode": profile["controls"]["whiteBalance"]["mode"],
+            "whiteBalanceMode": REPORTED_CONTROL_MODE["whiteBalance"][
+                profile["controls"]["whiteBalance"]["mode"]
+            ],
             "temperature": profile["controls"]["whiteBalance"]["temperature"],
             "tint": profile["controls"]["whiteBalance"]["tint"],
         }
         for field, expected in expected_controls.items():
             actual = applied_controls.get(field)
             try:
-                tolerance = max(1e-6, abs(float(expected)) * 0.01)
+                floor = CONTROL_TOLERANCE.get(field, 1e-6)
+                tolerance = max(floor, abs(float(expected)) * 0.01)
                 matches = abs(float(actual) - float(expected)) <= tolerance
             except (TypeError, ValueError):
                 matches = actual == expected
@@ -645,15 +689,16 @@ class EpisodeRecorder:
             size_matches = video_path.stat().st_size == int(finished.get("sizeBytes", -1))
             capture_profile = preflight["profile"]["capture"]
             output_width, output_height = recorded_dimensions(capture_profile)
+            by_arm = {
+                arm: [row for row in self.episode_telemetry if row.get("arm") == arm]
+                for arm in ("left", "right")
+            }
             report, frame_index = await asyncio.to_thread(
                 validate_episode,
                 video_path,
                 finished,
                 {
-                    "by_arm": {
-                        arm: [row for row in self.episode_telemetry if row.get("arm") == arm]
-                        for arm in ("left", "right")
-                    },
+                    "by_arm": by_arm,
                     "bridge_rtt_ns": self.episode_rtts,
                 },
                 camera_fit,
@@ -669,6 +714,10 @@ class EpisodeRecorder:
             for reason in automatic_failures:
                 report.fail(reason)
             write_frame_index(writer.path / "frames.csv", frame_index)
+            action_index = build_action_index(frame_index, by_arm, nuc_fit)
+            write_action_index(writer.path / "actions.csv", action_index)
+            if not action_index:
+                report.fail("action_index")
 
             manifest = {
                 "schema_version": SCHEMA_VERSION,
@@ -682,6 +731,11 @@ class EpisodeRecorder:
                     "description": "post-ramp absolute commanded EE box position",
                     "order": ["left_x", "left_y", "right_x", "right_y"],
                     "source": "robot.ndjson.commanded_box_xy",
+                    # One row per video frame, interpolated onto that frame's
+                    # timestamp. Use this rather than pairing robot.ndjson to
+                    # frames.csv by index or by nearest sample.
+                    "aligned": "actions.csv",
+                    "aligned_columns": ["left_box_x", "left_box_y", "right_box_x", "right_box_y"],
                 },
                 "git": {
                     "franka_teach": git_state(self.repo_root),
@@ -703,6 +757,7 @@ class EpisodeRecorder:
                     "keys.ndjson",
                     "clocks.json",
                     "frames.csv",
+                    "actions.csv",
                     "manifest.json",
                 ],
             )

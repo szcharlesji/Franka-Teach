@@ -16,7 +16,7 @@ from frankateach.recording import recorder as recorder_module
 from frankateach.recording import validation as validation_module
 from frankateach.recording.bridge import RobotBridge, TelemetryHub
 from frankateach.recording.camera import CameraAPIAdapter
-from frankateach.recording.clock import ClockSample, fit_clock
+from frankateach.recording.clock import ClockFit, ClockSample, fit_clock
 from frankateach.recording.ownership import ArmOwnership
 from frankateach.recording.protocol import PROTOCOL_VERSION, validate_keys
 from frankateach.recording.profile import apply_recording_profile, validate_recording_profile
@@ -218,6 +218,74 @@ def test_packet_probe():
         [packet["decode_order"] for packet in packets] == [1, 2, 0],
     )
     check("packet flags preserve keyframes", packets[0]["key_frame"])
+
+
+def test_action_index():
+    # Robot ticks at 59.54 Hz against video at 59.975 Hz: the rates beat, so no
+    # fixed frame/tick pairing exists and every frame lands between two samples.
+    fit = ClockFit(
+        scale=1.0, remote_origin_ns=0, local_origin_ns=0,
+        uncertainty_ns=0, min_rtt_ns=0, sample_count=2,
+    )
+    robot_dt = 1e9 / 59.54
+    frame_dt = 1e9 / 59.975
+    # Robot brackets the video by a second on each side, as recording does.
+    by_arm = {}
+    for arm, scale in (("left", 1.0), ("right", -2.0)):
+        by_arm[arm] = [
+            {
+                "state_mono_ns": int(index * robot_dt),
+                "commanded_box_xy": [scale * index * robot_dt / 1e9, 0.5],
+                "commanded_pos": [scale * index * robot_dt / 1e9, 0.1, 0.3],
+                "measured_pos": [scale * index * robot_dt / 1e9, 0.2, 0.3],
+                "speed": 0.25,
+            }
+            for index in range(int(22 * 59.54))
+        ]
+    origin = int(1e9)
+    frames = [
+        {"frame": index, "discovery_mono_ns": origin + int(index * frame_dt)}
+        for index in range(1201)
+    ]
+    rows = validation_module.build_action_index(frames, by_arm, fit)
+
+    check("one action row per video frame", len(rows) == len(frames))
+    check(
+        "action rows keep the frame's own timestamp",
+        [row["discovery_mono_ns"] for row in rows]
+        == [frame["discovery_mono_ns"] for frame in frames],
+    )
+    # The fixtures are linear in time, so exact interpolation is checkable. The
+    # tolerance is float64 resolution on ns-scale absolute timestamps, not a
+    # property of the interpolation -- it is still ~1e5 times tighter than the
+    # 4.6 mm of pose error this file exists to remove.
+    left = max(abs(row["left_box_x"] - row["discovery_mono_ns"] / 1e9) for row in rows)
+    right = max(abs(row["right_box_x"] + 2.0 * row["discovery_mono_ns"] / 1e9) for row in rows)
+    check(f"interpolation is exact on a linear signal ({left:.2e})", left < 1e-6)
+    check(f"each arm is resampled independently ({right:.2e})", right < 1e-6)
+    check(
+        "pre/post-roll means nothing is extrapolated",
+        not any(row["left_extrapolated"] or row["right_extrapolated"] for row in rows),
+    )
+    # The beat is the whole reason this file exists: assert it is really present,
+    # so the test would fail if the fixtures were accidentally made synchronous.
+    gaps = [row["left_interp_gap_ms"] for row in rows]
+    check(f"frames fall mid-interval, as they do on hardware (max {max(gaps):.2f} ms)",
+          max(gaps) > 4.0)
+
+    # A frame past the end of telemetry must be flagged, not silently clamped.
+    late = [{"frame": 0, "discovery_mono_ns": int(1e18)}]
+    flagged = validation_module.build_action_index(late, by_arm, fit)
+    check("frames outside the telemetry span are flagged", flagged[0]["left_extrapolated"] == 1)
+
+    # Too little telemetry to interpolate must yield nothing rather than a guess.
+    check(
+        "a single telemetry sample produces no action index",
+        validation_module.build_action_index(
+            frames, {"left": by_arm["left"][:1], "right": by_arm["right"]}, fit
+        )
+        == [],
+    )
 
 
 def test_camera_adapter_contract():
@@ -667,6 +735,7 @@ async def main():
     test_clock_and_protocol()
     test_strict_validation()
     test_packet_probe()
+    test_action_index()
     test_camera_adapter_contract()
     await test_robot_bridge()
     await test_episode_lifecycle()

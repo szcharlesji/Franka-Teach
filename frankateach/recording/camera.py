@@ -64,10 +64,13 @@ class CameraAPIAdapter:
 
     def _request(self, method, path, body=None, timeout=None):
         """Use the client's transport so usbmux remains an implementation detail."""
-        request = getattr(self.camera, "request", None) or getattr(
-            self.camera, "_request", None
-        )
-        if not callable(request):
+        request = None
+        for name in ("request", "_request", "_json"):
+            candidate = getattr(self.camera, name, None)
+            if callable(candidate):
+                request = candidate
+                break
+        if request is None:
             raise RuntimeError(
                 f"CameraAPI client cannot call {method} {path}: "
                 "no public method or request transport"
@@ -190,15 +193,15 @@ class CameraAPIAdapter:
 
     def active_recording(self):
         try:
-            return self._public(("recording", "get_recording"))
+            return self._public(("recording", "recording_progress"))
         except AttributeError:
             return self._request("GET", "/record")
 
     def file_info(self, recording_id):
-        method = getattr(self.camera, "file_info", None) or getattr(self.camera, "get_file", None)
-        if callable(method):
-            return self._unwrap(method(recording_id))
-        return self._request("GET", f"/files/{recording_id}")
+        try:
+            return self._public(("file_info", "get_file", "get_recording"), recording_id)
+        except AttributeError:
+            return self._request("GET", f"/files/{recording_id}")
 
     def files(self):
         try:

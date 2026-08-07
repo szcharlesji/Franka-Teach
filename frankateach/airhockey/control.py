@@ -1,6 +1,8 @@
 """Shared control primitives for air hockey teleop."""
 
 import pickle
+import queue
+import threading
 import time
 
 import numpy as np
@@ -101,6 +103,66 @@ class RateLimiter:
             self._next = now
 
         return remaining
+
+
+class StatePublisher(threading.Thread):
+    """Keeps ZMQ state publishing off the control loop's critical path.
+
+    pub_keypoints() pickles and sends synchronously, which at 60 Hz is the one
+    unbounded-latency call in the tick: a PUB send has to reach the socket
+    buffer, and the control thread should never be the one waiting for it.
+
+    Be clear about what this does and does not buy. Measured at 60 Hz, the tick
+    runs 128.6 us over its 16.67 ms budget; pickling both payloads is 12.7 us of
+    that, so moving it off-thread recovers roughly a tenth of the overrun. It
+    does NOT restore 60.000 Hz and is not meant to. The overrun is dominated by
+    the 16.36 ms blocking send_pose() round trip, which leaves only ~0.3 ms of
+    headroom, and by the scheduler latency a thread pays reacquiring the GIL
+    after a blocking recv while the sibling arm thread runs. All the Python
+    bookkeeping in the loop body put together is ~46 us. Getting to 60 Hz means
+    shortening the round trip or giving each arm its own process, not shuffling
+    work within the tick. Since actions.csv resamples onto frame timestamps, the
+    exact loop rate no longer affects alignment -- only its stability does.
+
+    A single worker draining a FIFO preserves publish order. A full queue drops
+    rather than blocks; that is not a new failure mode, since a ZMQ PUB socket
+    already discards for a subscriber that cannot keep up.
+
+    NB the stop flag is `_stop_event`, never `_stop`: on a Thread subclass that
+    name shadows Thread._stop(), which join() calls during teardown.
+    """
+
+    def __init__(self, channels, maxsize=256):
+        super().__init__(daemon=True, name="arm-publisher")
+        self._channels = tuple(channels)  # ((publisher, topic), ...)
+        self._queue = queue.Queue(maxsize=maxsize)
+        self._stop_event = threading.Event()
+        self.drops = 0
+
+    def publish(self, payloads):
+        try:
+            self._queue.put_nowait(tuple(payloads))
+        except queue.Full:
+            self.drops += 1
+
+    def run(self):
+        while True:
+            try:
+                payloads = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._stop_event.is_set():
+                    return
+                continue
+            for (publisher, topic), payload in zip(self._channels, payloads):
+                try:
+                    publisher.pub_keypoints(payload, topic)
+                except Exception:
+                    self.drops += 1
+
+    def close(self, timeout=1.0):
+        self._stop_event.set()
+        if self.is_alive() and self is not threading.current_thread():
+            self.join(timeout=timeout)
 
 
 def ramp(current, target, accel_time, dt, full_scale):

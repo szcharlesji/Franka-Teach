@@ -3,7 +3,7 @@
 capture:
   camera: back
   # Device-specific index from: camctl formats --min-fps 60
-  formatIndex: null
+  formatIndex: 30
   width: 1920
   height: 1080
   fps: 60
@@ -21,12 +21,13 @@ capture:
 controls:
   focus:
     mode: manual
-    lensPosition: null
+    lensPosition: 0.7215686
+
   exposure:
     mode: manual
-    durationSeconds: 0.002
-    iso: null
+    durationSeconds: 0.002075
+    iso: 200
   whiteBalance:
     mode: manual
-    temperature: null
+    temperature: 3500
     tint: 0

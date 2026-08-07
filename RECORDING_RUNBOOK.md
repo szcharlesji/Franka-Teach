@@ -158,8 +158,8 @@ is removed from the phone.
 
 Each episode contains the original MOV, CameraAPI configuration, SSE events and
 health samples, robot/key NDJSON, raw clock samples and fits, a packet-PTS frame
-index, manifest, and SHA-256 checksums. `manifest.json` declares the future
-canonical action as:
+index, a per-frame action index, manifest, and SHA-256 checksums.
+`manifest.json` declares the future canonical action as:
 
 ```text
 [left commanded box x, left commanded box y,
@@ -170,6 +170,32 @@ These are the absolute EE targets after acceleration ramping, box clipping, and
 the measured-position leash. Keyboard states are auxiliary input records;
 measured EE poses are state/diagnostics. Joint torques are produced below the
 OSC interface and are not part of this raw dataset.
+
+### Reading actions against video: use `actions.csv`
+
+`actions.csv` carries one row per video frame, holding the robot stream already
+resampled onto that frame's timestamp. Read actions from it. Do **not** pair
+`robot.ndjson` to `frames.csv` yourself.
+
+The camera and the control loop are free-running oscillators — measured at
+59.975 Hz and 59.54 Hz — so they beat with a ~2.3 s period and there is no fixed
+frame-to-tick correspondence. Pairing the two files by list index drifts a full
+frame every 2.3 s (~146 ms by the end of a 20 s episode); taking the nearest
+telemetry sample is bounded but still costs a median 4.1 ms and up to 8.6 ms of
+skew, which at the arm's 0.58 m/s is 4.6 mm of pose error. Interpolating onto
+the frame timestamp, which is what `actions.csv` is, removes both.
+
+Columns are `<arm>_box_x/y` (the canonical action), `<arm>_cmd_x/y/z`,
+`<arm>_meas_x/y/z`, and `<arm>_speed`, plus two diagnostics: `interp_gap_ms`,
+the distance to the nearer bracketing telemetry sample, and `extrapolated`,
+which is 1 only if a frame fell outside the telemetry span. Recording keeps
+about a second of pre- and post-roll so `extrapolated` should always be 0;
+a 1 means the robot stream did not cover the video.
+
+Do not chase an exact 60.000 Hz control loop to avoid this. The rates cannot be
+locked without a shared clock, and the blocking `send_pose()` round trip already
+consumes ~98% of the 16.67 ms period. Loop rate *stability* is what the strict
+gates check; alignment is handled by timestamps.
 
 This recorder does not create HDF5 files and does not assign train/validation
 splits.

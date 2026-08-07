@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from frankateach.airhockey.control import ArmLink, RateLimiter, ramp
+from frankateach.airhockey.control import ArmLink, RateLimiter, StatePublisher, ramp
 from frankateach.constants import HOST
 from frankateach.network import ZMQKeypointPublisher
 
@@ -96,6 +96,7 @@ class ArmOperator(threading.Thread):
         self.link = None
         self._state_pub = None
         self._cmd_pub = None
+        self._publisher = None
 
     # -- called from the input thread --------------------------------------
     def set_intent(
@@ -163,6 +164,13 @@ class ArmOperator(threading.Thread):
             if self.publish:
                 self._state_pub = ZMQKeypointPublisher(HOST, self.link.state_port)
                 self._cmd_pub = ZMQKeypointPublisher(HOST, self.link.commanded_port)
+                self._publisher = StatePublisher(
+                    (
+                        (self._state_pub, "robot_state"),
+                        (self._cmd_pub, "commanded_robot_state"),
+                    )
+                )
+                self._publisher.start()
 
             if self.reset:
                 print(f"[{self.arm}] resetting to ready pose...")
@@ -262,8 +270,7 @@ class ArmOperator(threading.Thread):
 
                 if self.publish:
                     state.start_teleop = not (stale or intent.frozen)
-                    self._state_pub.pub_keypoints(state, "robot_state")
-                    self._cmd_pub.pub_keypoints(action, "commanded_robot_state")
+                    self._publisher.publish((state, action))
 
                 now = time.perf_counter()
                 measured = now - last_tick
@@ -331,6 +338,12 @@ class ArmOperator(threading.Thread):
                 for _ in range(int(0.2 * self.hz)):
                     self.link.send_pose(pos)
                     time.sleep(1.0 / self.hz)
+        except Exception:
+            pass
+        # Stop the worker before the sockets it publishes on.
+        try:
+            if self._publisher is not None:
+                self._publisher.close()
         except Exception:
             pass
         for sock in (self._state_pub, self._cmd_pub):

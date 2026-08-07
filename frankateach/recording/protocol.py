@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 
 PROTOCOL_VERSION = 1
-SCHEMA_VERSION = 1
+# 2: episodes carry actions.csv, the robot stream resampled onto video frames.
+SCHEMA_VERSION = 2
 ARMS = ("left", "right")
 
 
