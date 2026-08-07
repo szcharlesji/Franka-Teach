@@ -4,6 +4,8 @@ Bi-Manual Franka 3 robot setup.
 
 For synchronized iPhone 1080p60 air-hockey collection across Discovery and the
 robot NUC, use [RECORDING_RUNBOOK.md](RECORDING_RUNBOOK.md).
+For focus, exposure, white-balance, and exact-format setup, use
+[CAMERA_CALIBRATION.md](CAMERA_CALIBRATION.md).
 
 
 ## NUC Setup

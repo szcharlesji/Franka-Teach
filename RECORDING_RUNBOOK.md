@@ -46,10 +46,11 @@ port forward itself.
 Edit `configs/camera_recording.yaml` on Discovery. Its null format index, lens
 position, ISO, and white-balance temperature deliberately block collection. Use
 `camctl --usbmux formats --min-fps 60` to select the exact 1920x1080 format
-index, then
-use setup preview and CameraAPI controls to find repeatable values under the
-installed lights. Start near a 1/500 s shutter (`durationSeconds: 0.002`), then
+index, then use setup preview and CameraAPI controls to find repeatable values
+under the installed lights. Start near a 1/500 s shutter
+(`durationSeconds: 0.002`), then
 tune ISO. Keep the phone fixed, powered, foregrounded, and in Guided Access.
+The complete procedure is in [CAMERA_CALIBRATION.md](CAMERA_CALIBRATION.md).
 
 The recording profile sets `allowFrameReordering: false` and GOP 12. The former
 makes encoded packet order equal presentation order; the recorder still sorts
