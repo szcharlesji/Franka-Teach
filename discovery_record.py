@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument("--bridge-remote-port", type=int, default=8765)
     parser.add_argument("--no-tunnel", action="store_true", help="testing only")
     parser.add_argument("--bind", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8848)
     return parser.parse_args()
 
 

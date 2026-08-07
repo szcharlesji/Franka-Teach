@@ -256,6 +256,9 @@ def test_camera_adapter_contract():
                     return
                 yield event
 
+        def snapshot(self, max_width=640, quality=0.65):
+            return b"\xff\xd8cameraapi-jpeg\xff\xd9"
+
         def close(self):
             self.event_queue.put(None)
 
@@ -298,6 +301,10 @@ def test_camera_adapter_contract():
     check(
         "adapter timestamps SSE receipt on Discovery",
         event["discovery_received_mono_ns"] > 0,
+    )
+    check(
+        "adapter preserves binary JPEG snapshots",
+        adapter.snapshot().startswith(b"\xff\xd8"),
     )
     adapter.close()
 

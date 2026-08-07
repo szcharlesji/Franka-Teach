@@ -103,7 +103,7 @@ python3 discovery_record.py \
   --duration 20
 ```
 
-Open <http://127.0.0.1:8080> directly on Discovery. The Discovery command:
+Open <http://127.0.0.1:8848> directly on Discovery. The Discovery command:
 
 - refuses to run on the robot NUC or store outside `~/data`;
 - starts and monitors `ssh -NT -L 18765:127.0.0.1:8765 franka`;
@@ -142,7 +142,7 @@ Abort is available only during preflight/recording. It stops and deletes the
 phone file, removes the local partial episode, and leaves a `manual_abort` audit
 row. It is intentionally unavailable once validation/finalization begins.
 
-The admin page at <http://127.0.0.1:8080/admin> exposes speed, arm-stack restart,
+The admin page at <http://127.0.0.1:8848/admin> exposes speed, arm-stack restart,
 and calibration. Opening it takes keyboard ownership; every admin operation
 freezes normal play first.
 

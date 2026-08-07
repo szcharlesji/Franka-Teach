@@ -413,4 +413,19 @@ class CameraAPIAdapter:
             return self._request("DELETE", f"/files/{recording_id}")
 
     def snapshot(self, max_width=640, quality=0.65):
-        return self._public(("snapshot",), max_width=max_width, quality=quality)
+        method = getattr(self.camera, "snapshot", None)
+        if not callable(method):
+            raise RuntimeError("CameraAPI client has no snapshot() method")
+        value = method(max_width=max_width, quality=quality)
+        if isinstance(value, tuple):
+            value = next(
+                (part for part in reversed(value) if isinstance(part, (bytes, bytearray))),
+                value,
+            )
+        if isinstance(value, bytearray):
+            value = bytes(value)
+        if not isinstance(value, bytes):
+            raise RuntimeError(
+                f"CameraAPI snapshot returned {type(value).__name__}, expected JPEG bytes"
+            )
+        return value
