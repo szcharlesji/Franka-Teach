@@ -244,6 +244,13 @@ def test_camera_adapter_contract():
             }
             return self.configure_args
 
+        def control(self, *, focus=None, exposure=None, white_balance=None):
+            return {
+                "focus": focus,
+                "exposure": exposure,
+                "white_balance": white_balance,
+            }
+
         def events(self):
             yield {
                 "type": "hello",
@@ -279,6 +286,25 @@ def test_camera_adapter_contract():
     check(
         "adapter maps frame-reordering control",
         configured["allow_frame_reordering"] is False,
+    )
+    controlled = adapter.control(
+        {
+            "focus": {"mode": "manual", "lensPosition": 0.24},
+            "exposure": {
+                "mode": "manual",
+                "durationSeconds": 0.002083333,
+                "iso": 450,
+            },
+            "whiteBalance": {
+                "mode": "manual",
+                "temperature": 6435,
+                "tint": 0,
+            },
+        }
+    )
+    check(
+        "adapter maps Python white_balance argument",
+        controlled["white_balance"]["temperature"] == 6435,
     )
     client.event_queue.put(
         (

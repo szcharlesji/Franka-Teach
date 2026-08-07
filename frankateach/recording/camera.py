@@ -137,7 +137,14 @@ class CameraAPIAdapter:
     def control(self, controls):
         method = getattr(self.camera, "control", None)
         if callable(method):
-            return self._unwrap(method(**controls))
+            kwargs = {
+                "white_balance" if key == "whiteBalance" else key: value
+                for key, value in controls.items()
+            }
+            try:
+                return self._unwrap(method(**kwargs))
+            except TypeError:
+                return self._unwrap(method(**controls))
         return self._request("POST", "/control", dict(controls))
 
     def clock(self):
