@@ -1,23 +1,7 @@
 control_hz: 50
-# Cruise speed at the OUTER edge of the box. joint1_speed_fraction below scales
-# this down automatically wherever joint 1 has less room, so this no longer has
-# to be a value that is safe everywhere -- set it for the fast end.
-speed: 0.6
-# Fraction of `speed` allowed when moving inward (-x in box axes, toward the
-# robot base). Purely for feel; the joint-1 budget below is the safety limit.
-# 1.0 = symmetric.
-inward_speed_scale: 0.5
-# Fraction of joint 1's 2.175 rad/s limit that play may use. Joint 1 carries all
-# box-y travel and its Cartesian ceiling is only omega*r, so it collapses toward
-# the base: ~0.86 m/s at this box's outer edge against ~0.48 m/s at the inner
-# one. The operator clamps both the commanded velocity and the leash to stay
-# inside this budget. 0 disables the limiter and restores the old behaviour.
+speed: 0.7
+inward_speed_scale: 0.3
 joint1_speed_fraction: 0.7
-# Peak EE speed the OSC controller drives per metre of leash: sqrt(Kp)/2, i.e.
-# 9.35 with Kp=350 from configs/osc-pose-controller.yml. This is why the leash
-# and not `speed` sets peak speed -- an 80 mm leash permits ~0.75 m/s however
-# low `speed` is. Fitted 6.5-7.0 on recorded episodes; the theoretical value is
-# kept as the conservative default. Lower it only with measurements in hand.
 lead_speed_gain: 9.35
 accel_time: 0.08
 max_lead: 0.08
@@ -43,72 +27,73 @@ arms:
     deoxys_config: deoxys_right_fast.yml
     ready_joints: null
     center:
-    - 0.37609634920954704
-    - 0.019908029586076736
-    yaw: -0.009456045665531513
+    - 0.3822084553539753
+    - 0.004437778145074844
+    yaw: -0.0083795567219886
     half_extents:
-    - 0.12776753561909948
-    - 0.1603463968879284
-    plane_z: 0.2889125123620033
+    - 0.13659850702308124
+    - 0.16239277808318503
+    plane_z: 0.29507192224264145
     fixed_quat:
-    - 0.9993892099734619
-    - -0.03494577211365749
+    - 0.9998876662576567
+      #- 0.014988491112082267
+    - 0.0
     - 0.0
     - 0.0
     corners:
-    - - 0.22699382901191711
-      - -0.15590745210647583
-      - 0.2896595895290375
-    - - 0.5205103754997253
-      - -0.15681183338165283
-      - 0.28755733370780945
-    - - 0.5218808054924011
-      - 0.19500066339969635
-      - 0.28804323077201843
-    - - 0.2350003868341446
-      - 0.19735074043273926
-      - 0.29038989543914795
-    z_spread: 0.002832561731338501
+    - - 0.22871746122837067
+      - -0.17167501151561737
+      - 0.29490843415260315
+    - - 0.5332653522491455
+      - -0.17601603269577026
+      - 0.2952074110507965
+    - - 0.5352991223335266
+      - 0.18186990916728973
+      - 0.2944399416446686
+    - - 0.2315518856048584
+      - 0.18357224762439728
+      - 0.29573190212249756
+    z_spread: 0.0012919604778289795
     plane_mode: constant
     plane_coeffs:
-    - 0.2889125123620033
-    - -0.007666252094150876
-    - 0.0017551282574674145
-    plane_residual: 7.4119641030157e-05
+    - 0.29507192224264145
+    - -0.0016286974879866339
+    - 6.775641498988055e-05
+    plane_residual: 0.00040011821540569814
   left:
     keys: wasd
     deoxys_config: deoxys_left_fast.yml
     ready_joints: null
     center:
-    - 0.3561544716358185
-    - -0.002923928201198578
-    yaw: -0.008780368790050827
+    - 0.3665218614041805
+    - -0.015463758260011673
+    yaw: -0.002027571906933218
     half_extents:
-    - 0.1158049505341084
-    - 0.15740673431279117
-    plane_z: 0.2989855036139488
+    - 0.13240939193459272
+    - 0.16028558872917492
+    plane_z: 0.29614218324422836
     fixed_quat:
-    - 0.9978316928796256
-    - -0.06581726737703861
+    - 0.9999924352726303
+    - -0.0038896526212930144
     - 0.0
     - 0.0
     corners:
-    - - 0.22384078800678253
-      - -0.17417551577091217
-      - 0.2986481189727783
-    - - 0.48853495717048645
-      - -0.1835029572248459
-      - 0.29817503690719604
-    - - 0.49068301916122437
-      - 0.17292679846286774
-      - 0.2988765835762024
-    - - 0.22155912220478058
-      - 0.173055961728096
-      - 0.30024227499961853
-    z_spread: 0.0020672380924224854
+    - - 0.21439968049526215
+      - -0.19147202372550964
+      - 0.29565832018852234
+    - - 0.5167064070701599
+      - -0.19246265292167664
+      - 0.2958213686943054
+    - - 0.5155131816864014
+      - 0.16195929050445557
+      - 0.2955641448497772
+    - - 0.21946817636489868
+      - 0.16012035310268402
+      - 0.29752489924430847
+    z_spread: 0.00196075439453125
     plane_mode: constant
     plane_coeffs:
-    - 0.2989855036139488
-    - -0.0034295573423299454
-    - 0.0032148764116433893
-    plane_residual: 0.0002317213763372017
+    - 0.2961421832442283
+    - -0.0029746151532686355
+    - 0.002277532542962064
+    plane_residual: 0.0005450111564544446
