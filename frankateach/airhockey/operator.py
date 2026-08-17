@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from frankateach.airhockey.control import ArmLink, RateLimiter, StatePublisher, ramp
-from frankateach.constants import HOST
+from frankateach.constants import HOST, JOINT1_VELOCITY_LIMIT
 from frankateach.network import ZMQKeypointPublisher
 
 
@@ -71,6 +71,32 @@ class ArmOperator(threading.Thread):
         self.hz = float(cfg["control_hz"])
         # speed is overridable so the launcher can cap an uncalibrated arm.
         self.speed = float(cfg["speed"] if speed is None else speed)
+        # Inward (-x in box axes, toward the robot base) is capped below the
+        # outward speed. Joint 1 carries all of the box-y travel, and its
+        # tangential ceiling is omega_limit * radius -- so the inner edge of a
+        # box centred 0.31 m out has ~0.48 m/s of headroom against ~0.86 m/s at
+        # the outer edge. Slowing the inward half keeps the same fraction of
+        # that ceiling across the box instead of only at the far end.
+        # 1.0 restores the original symmetric behaviour.
+        self.inward_scale = float(cfg.get("inward_speed_scale", 1.0))
+        if not 0.0 < self.inward_scale <= 1.0:
+            raise ValueError(
+                "inward_speed_scale must be in (0, 1] -- it only ever reduces "
+                f"speed, and 0 would trap the arm at the far edge. Got {self.inward_scale}"
+            )
+        # Joint-1 budget, in rad/s. See _joint1_ceiling / _lead_limit.
+        self.j1_fraction = float(cfg.get("joint1_speed_fraction", 0.0))
+        if not 0.0 <= self.j1_fraction <= 1.0:
+            raise ValueError(
+                f"joint1_speed_fraction must be in [0, 1], got {self.j1_fraction}"
+            )
+        self.j1_budget = self.j1_fraction * JOINT1_VELOCITY_LIMIT
+        # Peak EE speed the OSC controller drives per metre of leash.
+        self.lead_speed_gain = float(cfg.get("lead_speed_gain", 9.35))
+        if self.lead_speed_gain <= 0.0:
+            raise ValueError(
+                f"lead_speed_gain must be positive, got {self.lead_speed_gain}"
+            )
         self.accel_time = float(cfg["accel_time"])
         self.max_lead = float(cfg["max_lead"])
         self.watchdog = float(cfg["watchdog"])
@@ -136,6 +162,59 @@ class ArmOperator(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+
+    def _joint1_ceiling(self, xy):
+        """Base-frame EE speed at which joint 1 saturates, at position `xy`.
+
+        Joint 1 rotates about the base z axis, so it alone carries motion
+        tangential to the base radius: w = (x*vy - y*vx) / r^2. The worst case
+        at a point is pure tangential motion, needing w = v/r, so the ceiling is
+        simply `budget * r` -- and it collapses as the arm comes in toward the
+        base. For a box centred 0.31 m out that is ~0.86 m/s at the outer edge
+        against ~0.48 m/s at the inner one, a 1.8x spread across 17 cm of
+        travel, which is why a single `speed` number cannot be right everywhere.
+
+        Returns inf when the limiter is disabled or the arm is on the base axis,
+        where the notion degenerates; ROBOT_WORKSPACE_MIN keeps us far from it.
+        """
+        if self.j1_budget <= 0.0:
+            return float("inf")
+        r = float(np.hypot(xy[0], xy[1]))
+        if r < 1e-6:
+            return float("inf")
+        return self.j1_budget * r
+
+    def _joint1_clamp(self, vel, xy):
+        """Scale a commanded velocity so joint 1 stays inside its budget.
+
+        Uses the exact rate for the commanded direction rather than the
+        worst-case tangential bound, so purely radial motion -- which barely
+        turns joint 1 at all -- is not penalised.
+        """
+        if self.j1_budget <= 0.0:
+            return vel
+        r2 = float(xy[0] ** 2 + xy[1] ** 2)
+        if r2 < 1e-12:
+            return vel
+        w = abs(xy[0] * vel[1] - xy[1] * vel[0]) / r2
+        return vel * (self.j1_budget / w) if w > self.j1_budget else vel
+
+    def _lead_limit(self, xy):
+        """Leash length allowed at `xy`, tightened where joint 1 has less room.
+
+        The leash, not `speed`, is what sets *peak* speed. The OSC controller
+        drives toward roughly sqrt(Kp)/2 m/s for every metre of lead -- 9.35 1/s
+        at Kp=350 -- so an 80 mm leash permits ~0.75 m/s no matter how low
+        `speed` is. Recorded episodes bear this out: commanding 0.35 m/s, the
+        measured EE still peaked at 0.66 m/s, which is a harmless 77% of joint 1
+        at the box's outer edge but would be 139% of it at the inner edge.
+
+        So capping the commanded velocity alone does not prevent the reflex; the
+        leash has to shrink too. That is the whole reason this method exists.
+        """
+        if self.j1_budget <= 0.0:
+            return self.max_lead
+        return min(self.max_lead, self._joint1_ceiling(xy) / self.lead_speed_gain)
 
     def _z_lead(self, vel):
         """Vertical feedforward for the commanded xy velocity `vel` (base frame).
@@ -232,6 +311,10 @@ class ArmOperator(threading.Thread):
                     mag = np.linalg.norm(v)
                     if mag > 1.0:
                         v /= mag
+                    # After the diagonal normalisation, so the inward cap is a
+                    # real speed limit rather than something a diagonal dilutes.
+                    if v[0] < 0.0:
+                        v[0] *= self.inward_scale
                     desired = self.box.rotate_intent(v[0], v[1]) * speed_limit
 
                 if intent.home:
@@ -249,6 +332,9 @@ class ArmOperator(threading.Thread):
                     vel_mag = np.linalg.norm(vel)
                     if vel_mag > speed_limit:
                         vel *= speed_limit / vel_mag
+                    # Cruise cap: keeps joint 1 inside its budget in steady
+                    # state. The leash below handles the transient peaks.
+                    vel = self._joint1_clamp(vel, target[:2])
                     target[:2] = target[:2] + vel * dt
 
                 target[:2] = self.box.clip(target[:2])
@@ -260,8 +346,12 @@ class ArmOperator(threading.Thread):
                 actual = np.asarray(self.link.last_state.pos, dtype=np.float64)
                 delta_xy = target[:2] - actual[:2]
                 dist_xy = np.linalg.norm(delta_xy)
-                if dist_xy > self.max_lead:
-                    target[:2] = actual[:2] + delta_xy / dist_xy * self.max_lead
+                # Anchored on where the arm *is*, not on the target: the leash
+                # bounds the peak speed the controller will drive to, so it has
+                # to reflect the joint-1 headroom at the arm's own position.
+                lead_limit = self._lead_limit(actual[:2])
+                if dist_xy > lead_limit:
+                    target[:2] = actual[:2] + delta_xy / dist_xy * lead_limit
                 target[2] = self.box.z_at(target[:2]) + self._z_lead(vel)
 
                 command_mono_ns = time.perf_counter_ns()

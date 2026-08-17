@@ -42,6 +42,14 @@ z_min, z_max = 0.05, 0.7  # 232, 550
 ROBOT_WORKSPACE_MIN = np.array([x_min, y_min, z_min])
 ROBOT_WORKSPACE_MAX = np.array([x_max, y_max, z_max])
 
+# Panda joint velocity limits (rad/s). Exceeding one raises the
+# "joint_velocity_violation" reflex, which latches and needs a Desk
+# acknowledge + franka-interface restart. Joint 1 is the one air hockey can
+# actually reach: it rotates about the base z axis, so it alone carries motion
+# tangential to the base radius, and its Cartesian ceiling is only w*r.
+JOINT_VELOCITY_LIMITS = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
+JOINT1_VELOCITY_LIMIT = float(JOINT_VELOCITY_LIMITS[0])
+
 TRANSLATIONAL_POSE_VELOCITY_SCALE = 5
 ROTATIONAL_POSE_VELOCITY_SCALE = 0.75
 ROTATION_VELOCITY_LIMIT = 0.5
