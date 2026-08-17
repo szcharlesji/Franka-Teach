@@ -2,11 +2,11 @@ control_hz: 50
 # Cruise speed at the OUTER edge of the box. joint1_speed_fraction below scales
 # this down automatically wherever joint 1 has less room, so this no longer has
 # to be a value that is safe everywhere -- set it for the fast end.
-speed: 0.5
+speed: 0.6
 # Fraction of `speed` allowed when moving inward (-x in box axes, toward the
 # robot base). Purely for feel; the joint-1 budget below is the safety limit.
 # 1.0 = symmetric.
-inward_speed_scale: 0.2
+inward_speed_scale: 0.5
 # Fraction of joint 1's 2.175 rad/s limit that play may use. Joint 1 carries all
 # box-y travel and its Cartesian ceiling is only omega*r, so it collapses toward
 # the base: ~0.86 m/s at this box's outer edge against ~0.48 m/s at the inner
