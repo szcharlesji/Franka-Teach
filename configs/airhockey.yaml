@@ -1,5 +1,24 @@
 control_hz: 50
-speed: 0.35
+# Cruise speed at the OUTER edge of the box. joint1_speed_fraction below scales
+# this down automatically wherever joint 1 has less room, so this no longer has
+# to be a value that is safe everywhere -- set it for the fast end.
+speed: 0.5
+# Fraction of `speed` allowed when moving inward (-x in box axes, toward the
+# robot base). Purely for feel; the joint-1 budget below is the safety limit.
+# 1.0 = symmetric.
+inward_speed_scale: 0.2
+# Fraction of joint 1's 2.175 rad/s limit that play may use. Joint 1 carries all
+# box-y travel and its Cartesian ceiling is only omega*r, so it collapses toward
+# the base: ~0.86 m/s at this box's outer edge against ~0.48 m/s at the inner
+# one. The operator clamps both the commanded velocity and the leash to stay
+# inside this budget. 0 disables the limiter and restores the old behaviour.
+joint1_speed_fraction: 0.7
+# Peak EE speed the OSC controller drives per metre of leash: sqrt(Kp)/2, i.e.
+# 9.35 with Kp=350 from configs/osc-pose-controller.yml. This is why the leash
+# and not `speed` sets peak speed -- an 80 mm leash permits ~0.75 m/s however
+# low `speed` is. Fitted 6.5-7.0 on recorded episodes; the theoretical value is
+# kept as the conservative default. Lower it only with measurements in hand.
+lead_speed_gain: 9.35
 accel_time: 0.08
 max_lead: 0.08
 home_speed: 0.15
