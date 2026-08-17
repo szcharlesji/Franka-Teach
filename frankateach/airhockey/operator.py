@@ -84,6 +84,17 @@ class ArmOperator(threading.Thread):
                 "inward_speed_scale must be in (0, 1] -- it only ever reduces "
                 f"speed, and 0 would trap the arm at the far edge. Got {self.inward_scale}"
             )
+        # Left/right (box y) is capped the same way, in both directions. `speed`
+        # is therefore the *outward* speed only: box y travel is pure joint-1
+        # rotation, so it hits the tangential ceiling before x does, and running
+        # it at the outward speed is what makes lateral moves accelerate harder
+        # than inward ones. 1.0 restores the original symmetric behaviour.
+        self.lateral_scale = float(cfg.get("lateral_speed_scale", 1.0))
+        if not 0.0 < self.lateral_scale <= 1.0:
+            raise ValueError(
+                "lateral_speed_scale must be in (0, 1] -- it only ever reduces "
+                f"speed, and 0 would pin the arm to one column. Got {self.lateral_scale}"
+            )
         # Joint-1 budget, in rad/s. See _joint1_ceiling / _lead_limit.
         self.j1_fraction = float(cfg.get("joint1_speed_fraction", 0.0))
         if not 0.0 <= self.j1_fraction <= 1.0:
@@ -315,6 +326,7 @@ class ArmOperator(threading.Thread):
                     # real speed limit rather than something a diagonal dilutes.
                     if v[0] < 0.0:
                         v[0] *= self.inward_scale
+                    v[1] *= self.lateral_scale
                     desired = self.box.rotate_intent(v[0], v[1]) * speed_limit
 
                 if intent.home:

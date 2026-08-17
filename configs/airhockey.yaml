@@ -1,6 +1,7 @@
 control_hz: 50
 speed: 0.7
 inward_speed_scale: 0.3
+lateral_speed_scale: 0.3
 joint1_speed_fraction: 0.7
 lead_speed_gain: 9.35
 accel_time: 0.08

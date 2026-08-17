@@ -312,6 +312,79 @@ def test_inward_speed_scale():
             check(f"inward_speed_scale={bad} rejected", True)
 
 
+def test_lateral_speed_scale():
+    """Left/right must be capped symmetrically, and independently of inward.
+
+    Both y directions are pure joint-1 rotation, so unlike the inward cap this
+    one is not sign-dependent -- a scale that only bit one way would leave the
+    asymmetry it exists to remove.
+    """
+    print("\n-- lateral speed scale --")
+    scale = 0.5
+    box = make_box()
+    server = FakeServer("right")
+    server.start()
+    op = ArmOperator(
+        "right",
+        box,
+        # inward left at 1.0 so a lateral cap leaking into x shows up.
+        dict(CFG, lateral_speed_scale=scale, inward_speed_scale=1.0),
+        publish=False,
+    )
+    op.start()
+    try:
+        if not op.wait_ready(timeout=20):
+            check("operator came up", False)
+            return
+
+        def sweep(vx, vy, seconds=1.2):
+            """Mean commanded speed along the driven box axis."""
+            axis = 0 if vx else 1
+            # Park against the opposite edge first, so the sweep has full travel.
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                op.set_intent(-vx, -vy)
+                time.sleep(0.02)
+            n0 = len(server.commands)
+            deadline = time.time() + seconds
+            while time.time() < deadline:
+                op.set_intent(vx, vy)
+                time.sleep(0.02)
+            cmds = np.array(server.commands[n0:])
+            local = np.array([box.to_box(c[:2]) for c in cmds])
+            # Ignore the ramp: take the fastest sustained window.
+            step = np.abs(np.diff(local[:, axis]))
+            return float(np.mean(np.sort(step)[-len(step) // 3 :])) * CFG["control_hz"]
+
+        outward = sweep(+1.0, 0.0)
+        left = sweep(0.0, +1.0)
+        right = sweep(0.0, -1.0)
+        check(
+            "outward sweep is untouched by the lateral cap",
+            abs(outward - CFG["speed"]) < 0.05,
+            f"({outward:.3f} m/s vs {CFG['speed']})",
+        )
+        for name, got in (("+y", left), ("-y", right)):
+            ratio = got / outward if outward else 0.0
+            check(
+                f"{name} sweep is capped at {scale}x",
+                abs(ratio - scale) < 0.08,
+                f"(ratio {ratio:.3f}, {got:.3f} m/s)",
+            )
+    finally:
+        op.stop()
+        op.join(timeout=5)
+        server.stop.set()
+        server.join(timeout=3)
+
+    for bad in (0.0, -0.5, 6.0):
+        try:
+            ArmOperator("right", box, dict(CFG, lateral_speed_scale=bad), publish=False)
+            check(f"lateral_speed_scale={bad} rejected", False)
+        except ValueError:
+            check(f"lateral_speed_scale={bad} rejected", True)
+
+
 def test_joint1_budget():
     """The joint-1 budget must bind near the base and stay out of the way far out.
 
@@ -500,6 +573,7 @@ if __name__ == "__main__":
     test_single_arm()
     test_bimanual()
     test_inward_speed_scale()
+    test_lateral_speed_scale()
     test_joint1_budget()
     test_config_roundtrip()
     print()
