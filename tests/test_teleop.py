@@ -450,6 +450,125 @@ def test_joint1_budget():
         server.join(timeout=3)
 
 
+def test_xy_feedforward():
+    """The in-plane friction feedforward offsets the command without drifting.
+
+    The failure mode worth guarding is accumulation: `target` is the integrator,
+    so folding the offset into it would add xy_ff every tick and walk the arm
+    into the box wall. The offset must be applied once, per tick, to the
+    outgoing command only.
+    """
+    print("\n-- xy friction feedforward --")
+    box = make_box()
+    ff_x = 0.012
+    cfg = dict(CFG, xy_feedforward_x=ff_x, xy_feedforward_y=0.0, xy_feedforward_knee=0.05)
+    op = ArmOperator("right", box, cfg, publish=False)
+
+    # Shape: direction-dependent, speed-independent above the knee, ramped below.
+    check("offset is zero at rest", not op._xy_lead(np.zeros(2)).any())
+    fast = op._xy_lead(np.array([0.30, 0.0]))
+    faster = op._xy_lead(np.array([0.60, 0.0]))
+    check(
+        "offset saturates above the knee (Coulomb-shaped)",
+        np.allclose(fast, faster) and abs(fast[0] - ff_x) < 1e-9,
+        f"({fast[0] * 1000:.1f} mm)",
+    )
+    check(
+        "offset reverses with travel direction",
+        np.allclose(op._xy_lead(np.array([-0.30, 0.0])), -fast),
+    )
+    check(
+        "offset ramps through the knee rather than stepping",
+        abs(op._xy_lead(np.array([0.025, 0.0]))[0] - ff_x * 0.5) < 1e-9,
+    )
+    check(
+        "an axis with no gain gets no offset",
+        op._xy_lead(np.array([0.0, 0.5]))[1] == 0.0,
+    )
+    check(
+        "magnitude is capped",
+        np.linalg.norm(
+            ArmOperator(
+                "right",
+                box,
+                dict(CFG, xy_feedforward_x=0.5, xy_feedforward_limit=0.02),
+                publish=False,
+            )._xy_lead(np.array([0.3, 0.0]))
+        )
+        <= 0.02 + 1e-12,
+    )
+    check("disabled by default", not ArmOperator("right", box, CFG, publish=False)._xy_lead(
+        np.array([0.3, 0.0])).any())
+
+    server = FakeServer("right")
+    server.start()
+    op.start()
+    try:
+        if not op.wait_ready(timeout=20):
+            check("operator came up", False)
+            return
+        # Hold +x until it settles against the far edge. If the offset were
+        # accumulating, the commanded x would keep climbing tick after tick.
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            op.set_intent(1.0, 0.0)
+            time.sleep(0.02)
+        tail = np.array([box.to_box(c[:2])[0] for c in server.commands[-60:]])
+        check(
+            "commanded x settles instead of accumulating",
+            tail.std() < 1e-4,
+            f"(std {tail.std() * 1e6:.2f} um over the last 60 commands)",
+        )
+        check(
+            "every command stayed inside the box",
+            all(box.contains(c[:2], tol=1e-6) for c in server.commands[-200:]),
+        )
+    finally:
+        op.stop()
+        op.join(timeout=5)
+        server.stop.set()
+        server.join(timeout=3)
+
+    # Prove the offset actually reaches the wire. Cruise the long (y) axis,
+    # which has room to travel without the box clip absorbing the offset, and
+    # compare the commanded position with the feedforward on and off.
+    def cruise_y(gain):
+        srv = FakeServer("right")
+        srv.start()
+        operator = ArmOperator(
+            "right", box, dict(CFG, xy_feedforward_y=gain), publish=False
+        )
+        operator.start()
+        try:
+            if not operator.wait_ready(timeout=20):
+                return None
+            deadline = time.time() + 2.5  # park against -y
+            while time.time() < deadline:
+                operator.set_intent(0.0, -1.0)
+                time.sleep(0.02)
+            start = time.time()
+            while time.time() - start < 1.0:  # fixed cruise window
+                operator.set_intent(0.0, 1.0)
+                time.sleep(0.02)
+            return box.to_box(np.array(srv.commands[-1])[:2])[1]
+        finally:
+            operator.stop()
+            operator.join(timeout=5)
+            srv.stop.set()
+            srv.join(timeout=3)
+
+    without = cruise_y(0.0)
+    with_ff = cruise_y(ff_x)
+    if without is None or with_ff is None:
+        check("feedforward comparison ran", False)
+    else:
+        check(
+            "the offset reaches the commanded pose",
+            abs((with_ff - without) - ff_x) < 0.004,
+            f"(lead {(with_ff - without) * 1000:+.1f} mm, expected {ff_x * 1000:+.1f})",
+        )
+
+
 def test_config_roundtrip():
     print("\n-- config --")
     src = Path(__file__).resolve().parent.parent / "configs" / "airhockey.yaml"
@@ -501,6 +620,7 @@ if __name__ == "__main__":
     test_bimanual()
     test_inward_speed_scale()
     test_joint1_budget()
+    test_xy_feedforward()
     test_config_roundtrip()
     print()
     print("FAILED:", fails if fails else "none")

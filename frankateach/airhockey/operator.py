@@ -106,6 +106,22 @@ class ArmOperator(threading.Thread):
             [float(cfg.get("z_feedforward_x", 0.0)), float(cfg.get("z_feedforward_y", 0.0))]
         )
         self.z_ff_limit = abs(float(cfg.get("z_feedforward_limit", 0.01)))
+        # In-plane counterpart of z_ff. See _xy_lead. Base-frame [x, y] metres.
+        # Zero (the default) disables it and leaves the command bit-identical.
+        self.xy_ff = np.array(
+            [
+                float(cfg.get("xy_feedforward_x", 0.0)),
+                float(cfg.get("xy_feedforward_y", 0.0)),
+            ]
+        )
+        self.xy_ff_limit = abs(float(cfg.get("xy_feedforward_limit", 0.02)))
+        # Speed at which the offset reaches full magnitude. Without it, a
+        # direction-dependent offset would step by 2*xy_ff the instant velocity
+        # crosses zero -- precisely at a reversal, which is where
+        # joint_velocity_violation already lives.
+        self.xy_ff_knee = abs(float(cfg.get("xy_feedforward_knee", 0.05)))
+        if self.xy_ff_knee <= 0.0:
+            raise ValueError("xy_feedforward_knee must be positive")
         self.publish = publish
         # Recording observes the control loop here. The callback must be
         # non-blocking; a false return means its bounded queue overflowed.
@@ -215,6 +231,40 @@ class ArmOperator(threading.Thread):
         if self.j1_budget <= 0.0:
             return self.max_lead
         return min(self.max_lead, self._joint1_ceiling(xy) / self.lead_speed_gain)
+
+    def _xy_lead(self, vel):
+        """In-plane feedforward for the friction that makes x lag more than y.
+
+        The OSC controller settles to
+
+            e = (Kd/Kp)*v  +  (1/Kp) * Lambda^-1 * F_uncompensated
+
+        scripts/wobble_test.py already reports both halves per axis: its
+        "lag along" column against "predicted", where predicted is the first
+        term, -2*v/sqrt(Kp). Whatever "lag along" shows on top of "predicted"
+        is F_uncompensated, and that excess is what this cancels.
+
+        It is far larger on x than on y. x is driven by the shoulder and elbow,
+        which rotate about horizontal axes while carrying the arm's weight; y is
+        the base yaw joint, whose vertical axis neither fights gravity nor loads
+        its bearings the same way. The same asymmetry is already visible in
+        z_feedforward_x (0.0105) against z_feedforward_y (-0.0015).
+
+        Coulomb-shaped and per axis: the offset follows the *direction* of
+        travel rather than its magnitude, ramped in over `xy_ff_knee` so a
+        reversal does not step the command. Add a speed-proportional term only
+        if wobble_test shows the excess growing with speed -- flat means dry
+        friction, which this shape already matches.
+        """
+        if not self.xy_ff.any():
+            return np.zeros(2)
+        offset = self.xy_ff * np.clip(
+            np.asarray(vel, dtype=np.float64) / self.xy_ff_knee, -1.0, 1.0
+        )
+        norm = float(np.linalg.norm(offset))
+        if norm > self.xy_ff_limit:
+            offset = offset * (self.xy_ff_limit / norm)
+        return offset
 
     def _z_lead(self, vel):
         """Vertical feedforward for the commanded xy velocity `vel` (base frame).
@@ -352,10 +402,31 @@ class ArmOperator(threading.Thread):
                 lead_limit = self._lead_limit(actual[:2])
                 if dist_xy > lead_limit:
                     target[:2] = actual[:2] + delta_xy / dist_xy * lead_limit
-                target[2] = self.box.z_at(target[:2]) + self._z_lead(vel)
+                # The pose actually sent. Deliberately NOT written back into
+                # `target`: target is the integrator, so folding the feedforward
+                # into it would accumulate the offset every tick instead of
+                # applying it once.
+                command_xy = target[:2]
+                offset = self._xy_lead(vel)
+                if offset.any():
+                    command_xy = self.box.clip(target[:2] + offset)
+                    # The feedforward does not get to buy extra lead. The
+                    # joint-1 budget reasons about total command-to-arm
+                    # distance, so that bound has to hold for what is sent.
+                    delta_ff = command_xy - actual[:2]
+                    dist_ff = np.linalg.norm(delta_ff)
+                    if dist_ff > lead_limit:
+                        command_xy = actual[:2] + delta_ff / dist_ff * lead_limit
+                command = np.array(
+                    [
+                        command_xy[0],
+                        command_xy[1],
+                        self.box.z_at(command_xy) + self._z_lead(vel),
+                    ]
+                )
 
                 command_mono_ns = time.perf_counter_ns()
-                state, action = self.link.send_pose(target)
+                state, action = self.link.send_pose(command)
                 state_mono_ns = time.perf_counter_ns()
 
                 if self.publish:

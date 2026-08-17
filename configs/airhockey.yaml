@@ -19,8 +19,8 @@ joint1_speed_fraction: 0.7
 # low `speed` is. Fitted 6.5-7.0 on recorded episodes; the theoretical value is
 # kept as the conservative default. Lower it only with measurements in hand.
 lead_speed_gain: 9.35
-accel_time: 0.08
-max_lead: 0.08
+accel_time: 0.05
+max_lead: 0.05
 home_speed: 0.15
 margin: 0.015
 watchdog: 0.1
@@ -30,6 +30,22 @@ plane_offset: 0.01
 z_feedforward_x: 0.0105
 z_feedforward_y: -0.0015
 z_feedforward_limit: 0.006
+# In-plane friction feedforward, base-frame [x, y] metres, applied along the
+# direction of travel. This is why forward/back feels heavier than left/right:
+# x is driven by the shoulder and elbow against gravity and their own friction,
+# y by the base yaw joint whose vertical axis does neither.
+#
+# MEASURE, do not guess. Run:
+#     python3 scripts/wobble_test.py --arm <arm> --axes xy --speeds 0.15,0.40
+# and read the "lag along" column against "predicted". predicted is the
+# controller's own -2*v/sqrt(Kp) lag; the EXCESS over it is the number that
+# goes here, per axis. Expect x >> y. Zero disables the feedforward.
+xy_feedforward_x: 0.0
+xy_feedforward_y: 0.0
+# Cap on the offset magnitude, and the speed at which it reaches full value.
+# The knee exists so a reversal ramps the offset instead of stepping it.
+xy_feedforward_limit: 0.02
+xy_feedforward_knee: 0.05
 jog_speed: 0.08
 jog_z_speed: 0.04
 trace_speed: 0.06
