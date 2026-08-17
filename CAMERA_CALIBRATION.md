@@ -1,6 +1,6 @@
 # iPhone camera calibration for air-hockey recording
 
-This guide produces a deterministic CameraAPI profile for synchronized
+This guide produces a deterministic AnyCamera profile for synchronized
 air-hockey collection. Perform it on Discovery with the iPhone mounted in its
 final position and the table lighting in its final state.
 
@@ -12,7 +12,7 @@ episode is repeatable.
 
 ## 1. Check the device and exact format
 
-Keep the CameraAPI app foregrounded, preferably in Guided Access. On Discovery:
+Keep the AnyCamera app foregrounded, preferably in Guided Access. On Discovery:
 
 ```bash
 cd ~/Camera-API
@@ -37,7 +37,7 @@ means the same thing.
 
 ## 2. Understand Python versus HTTP spelling
 
-CameraAPI's HTTP JSON uses `whiteBalance`. Its Python client method uses the
+AnyCamera's HTTP JSON uses `whiteBalance`. Its Python client method uses the
 snake-case argument `white_balance`:
 
 ```python
@@ -48,7 +48,7 @@ cam.control(
 )
 ```
 
-Passing `whiteBalance=` directly to `CameraAPI.control()` raises an unexpected
+Passing `whiteBalance=` directly to `AnyCamera.control()` raises an unexpected
 keyword-argument error. The Franka-Teach adapter translates the profile's HTTP
 spelling to the Python spelling automatically.
 
@@ -61,9 +61,9 @@ the complete control document:
 cd ~/Camera-API
 PYTHONPATH=client python3 - <<'PY'
 from pprint import pprint
-from camera_api import CameraAPI
+from anycamera import AnyCamera
 
-cam = CameraAPI(usbmux=True)
+cam = AnyCamera(usbmux=True)
 pprint(cam.status()["controls"])
 PY
 ```
@@ -90,9 +90,9 @@ Run a single autofocus sweep and let it settle:
 cd ~/Camera-API
 PYTHONPATH=client python3 - <<'PY'
 from pprint import pprint
-from camera_api import CameraAPI
+from anycamera import AnyCamera
 
-cam = CameraAPI(usbmux=True)
+cam = AnyCamera(usbmux=True)
 pprint(cam.focus_once(point=[0.5, 0.5]))
 PY
 ```
@@ -123,9 +123,9 @@ by the baseline query:
 cd ~/Camera-API
 PYTHONPATH=client python3 - <<'PY'
 from pprint import pprint
-from camera_api import CameraAPI
+from anycamera import AnyCamera
 
-cam = CameraAPI(usbmux=True)
+cam = AnyCamera(usbmux=True)
 result = cam.control(
     focus={
         "mode": "manual",
@@ -167,9 +167,9 @@ automatic convergence can provide a starting point:
 cd ~/Camera-API
 PYTHONPATH=client python3 - <<'PY'
 from pprint import pprint
-from camera_api import CameraAPI
+from anycamera import AnyCamera
 
-cam = CameraAPI(usbmux=True)
+cam = AnyCamera(usbmux=True)
 pprint(cam.lock_everything(converge=True))
 pprint(cam.status()["controls"])
 PY

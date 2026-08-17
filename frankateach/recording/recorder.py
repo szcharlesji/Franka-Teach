@@ -33,7 +33,7 @@ def recorded_dimensions(capture):
     return width, height
 
 
-# CameraAPI's request vocabulary is not its status vocabulary. A request mode is
+# AnyCamera's request vocabulary is not its status vocabulary. A request mode is
 # one of auto/single/locked/manual, but /status reports the AVFoundation enum the
 # device actually landed in, and only AVCaptureDevice.ExposureMode has a custom
 # case. Pinning a lens position or a white-balance temperature therefore reads
@@ -143,7 +143,7 @@ class EpisodeRecorder:
         bridge,
         camera_profile_path,
         repo_root,
-        camera_repo_root,
+        anycamera_repo_root,
         default_duration=20.0,
         pre_roll_seconds=1.0,
         post_roll_seconds=1.0,
@@ -153,7 +153,7 @@ class EpisodeRecorder:
         self.bridge = bridge
         self.camera_profile_path = Path(camera_profile_path).expanduser().resolve()
         self.repo_root = Path(repo_root).resolve()
-        self.camera_repo_root = Path(camera_repo_root).expanduser().resolve()
+        self.anycamera_repo_root = Path(anycamera_repo_root).expanduser().resolve()
         self.default_duration = float(default_duration)
         self.pre_roll_ns = int(pre_roll_seconds * 1e9)
         self.post_roll_seconds = float(post_roll_seconds)
@@ -308,11 +308,11 @@ class EpisodeRecorder:
         profile = load_camera_profile(self.camera_profile_path)
         event_error = getattr(self.camera, "event_error", None)
         if event_error:
-            failures.append(f"CameraAPI SSE stream failed: {event_error}")
+            failures.append(f"AnyCamera SSE stream failed: {event_error}")
         try:
             self.camera_status = await self.refresh_camera_status()
         except Exception as exc:
-            failures.append(f"CameraAPI health check failed: {type(exc).__name__}: {exc}")
+            failures.append(f"AnyCamera health check failed: {type(exc).__name__}: {exc}")
             self.camera_status = {}
         camera_files = await asyncio.to_thread(self.camera.files)
         phone_free = int(camera_files.get("freeDiskBytes", 0) or 0)
@@ -333,10 +333,10 @@ class EpisodeRecorder:
             or self.camera_status
         )
         if session_status and not session_status.get("running", False):
-            failures.append("CameraAPI capture session is not running")
+            failures.append("AnyCamera capture session is not running")
         if session_status.get("interrupted", False):
             failures.append(
-                "CameraAPI session is interrupted: "
+                "AnyCamera session is interrupted: "
                 f"{session_status.get('interruptionReason')}"
             )
         expected_capture = {
@@ -561,7 +561,7 @@ class EpisodeRecorder:
         self.store.audit("episode_started", episode=writer.episode_id, duration=duration)
         try:
             self.state = "recording"
-            self.message = "starting CameraAPI recording"
+            self.message = "starting AnyCamera recording"
             camera_event_cursor = self.camera.event_cursor()
             camera_start = await asyncio.to_thread(
                 self.camera.start_recording, writer.episode_id, duration
@@ -739,7 +739,7 @@ class EpisodeRecorder:
                 },
                 "git": {
                     "franka_teach": git_state(self.repo_root),
-                    "camera_api": git_state(self.camera_repo_root),
+                    "anycamera": git_state(self.anycamera_repo_root),
                 },
                 "nuc": self.bridge.status.get("host"),
                 "camera_profile": str(self.camera_profile_path),

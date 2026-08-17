@@ -50,7 +50,7 @@ class ClockFit:
 
 
 def camera_sample(local_send_ns, capture_clock_ns, local_recv_ns):
-    """Represent CameraAPI's single cheap /clock timestamp as an NTP sample."""
+    """Represent AnyCamera's single cheap /clock timestamp as an NTP sample."""
     remote = int(capture_clock_ns)
     return ClockSample(
         local_send_ns=int(local_send_ns),

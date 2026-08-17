@@ -8,8 +8,8 @@ separate from the existing 50 Hz `run.py` workflow.
 
 | Device | Process |
 |---|---|
-| iPhone 13 Pro | CameraAPI app, foreground and in Guided Access |
-| Discovery desktop | `discovery_record.py`, local browser, USB CameraAPI client, SSH tunnel, validation, and `~/data` storage |
+| iPhone 13 Pro | AnyCamera app, foreground and in Guided Access |
+| Discovery desktop | `discovery_record.py`, local browser, USB AnyCamera client, SSH tunnel, validation, and `~/data` storage |
 | Robot NUC | `robot_host.py`, both Deoxys interfaces, both Franka servers, both 60 Hz operators, and the loopback bridge |
 | Franka controllers | FCI and the normal low-level control stack |
 
@@ -27,7 +27,7 @@ git clone <Franka-Teach-remote> ~/charles/Franka-Teach
 git clone <Camera-API-remote> ~/Camera-API
 ```
 
-Install/pair the iPhone as described by Camera-API. The recorder uses the pure
+Install/pair the iPhone as described by AnyCamera. The recorder uses the pure
 Python usbmux transport, so it does not need a persistent `iproxy`:
 
 ```bash
@@ -46,7 +46,7 @@ port forward itself.
 Edit `configs/camera_recording.yaml` on Discovery. Its null format index, lens
 position, ISO, and white-balance temperature deliberately block collection. Use
 `camctl --usbmux formats --min-fps 60` to select the exact 1920x1080 format
-index, then use setup preview and CameraAPI controls to find repeatable values
+index, then use setup preview and AnyCamera controls to find repeatable values
 under the installed lights. Start near a 1/500 s shutter
 (`durationSeconds: 0.002`), then
 tune ISO. Keep the phone fixed, powered, foregrounded, and in Guided Access.
@@ -56,7 +56,7 @@ The recording profile sets `allowFrameReordering: false` and GOP 12. The former
 makes encoded packet order equal presentation order; the recorder still sorts
 packet PTS defensively and rejects a file whose decode order proves that frame
 reordering occurred. Do not derive `frames.csv` from decoded-frame output:
-the CameraAPI contract documents that ffprobe can omit the final decoded
+the AnyCamera contract documents that ffprobe can omit the final decoded
 picture. Validation decodes the complete video for corruption detection, then
 uses packet PTS and flags for the exact frame index and keyframe checks.
 
@@ -92,7 +92,7 @@ the interfaces/servers/operators, and binds the bridge to NUC loopback port
 8765. `Ctrl-C` freezes/parks the operators and tears down its child processes.
 The normal `python3 run.py` command remains unchanged for other users.
 
-On Discovery, with the iPhone attached over USB and CameraAPI visible in the
+On Discovery, with the iPhone attached over USB and AnyCamera visible in the
 foreground:
 
 ```bash
@@ -108,7 +108,7 @@ Open <http://127.0.0.1:8848> directly on Discovery. The Discovery command:
 
 - refuses to run on the robot NUC or store outside `~/data`;
 - starts and monitors `ssh -NT -L 18765:127.0.0.1:8765 franka`;
-- imports CameraAPI from `~/Camera-API/client` with `usbmux=True`;
+- imports AnyCamera from `~/Camera-API/client` with `usbmux=True`;
 - applies and reads back the camera profile;
 - creates `~/data/air_hockey/puck_demo_01_<UTC>/`.
 
@@ -118,7 +118,7 @@ most 20 ms, both loop rates are at least 57 Hz, both calibrations are real, the
 camera configuration is exact, the phone is thermally healthy, and both devices
 have the configured free-space reserve.
 
-Discovery keeps a persistent CameraAPI SSE connection. A real
+Discovery keeps a persistent AnyCamera SSE connection. A real
 `recording.firstFrame` event with non-null `firstVideoPTSSeconds` is required;
 polling `framesWritten` is not accepted as an event substitute. All server events
 and their Discovery receipt timestamps are retained verbatim. `/status` is also
@@ -135,7 +135,7 @@ session or repeated USB failure triggers an early stop and quarantine.
   freeze through the NUC-side watchdog
 
 Control is continuous; Start and clip finalization never home or freeze the
-arms. Start creates a fixed-duration CameraAPI recording and waits for the first
+arms. Start creates a fixed-duration AnyCamera recording and waits for the first
 captured frame. The iPhone auto-stops. Preview is setup-only and is unavailable
 while recording or finalizing.
 
@@ -156,7 +156,7 @@ phone returns an ID, so the next launch reports prior partial paths and their
 phone recording IDs for recovery review. A verified local raw or rejected copy
 is removed from the phone.
 
-Each episode contains the original MOV, CameraAPI configuration, SSE events and
+Each episode contains the original MOV, AnyCamera configuration, SSE events and
 health samples, robot/key NDJSON, raw clock samples and fits, a packet-PTS frame
 index, a per-frame action index, manifest, and SHA-256 checksums.
 `manifest.json` declares the future canonical action as:

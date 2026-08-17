@@ -15,7 +15,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from frankateach.recording import recorder as recorder_module
 from frankateach.recording import validation as validation_module
 from frankateach.recording.bridge import RobotBridge, TelemetryHub
-from frankateach.recording.camera import CameraAPIAdapter
+from frankateach.recording.camera import AnyCameraAdapter
 from frankateach.recording.clock import ClockFit, ClockSample, fit_clock
 from frankateach.recording.ownership import ArmOwnership
 from frankateach.recording.protocol import PROTOCOL_VERSION, validate_keys
@@ -23,7 +23,7 @@ from frankateach.recording.profile import apply_recording_profile, validate_reco
 from frankateach.recording.recorder import EpisodeRecorder, recorded_dimensions
 from frankateach.recording.storage import SessionStore
 from frankateach.recording.validation import ValidationReport, validate_episode
-from tests.fake_camera_api import FakeCameraAPI
+from tests.fake_anycamera import FakeAnyCamera
 
 fails = []
 
@@ -332,13 +332,13 @@ def test_camera_adapter_contract():
                 yield event
 
         def snapshot(self, max_width=640, quality=0.65):
-            return b"\xff\xd8cameraapi-jpeg\xff\xd9"
+            return b"\xff\xd8anycamera-jpeg\xff\xd9"
 
         def close(self):
             self.event_queue.put(None)
 
     client = DocumentedClient()
-    adapter = CameraAPIAdapter(client)
+    adapter = AnyCameraAdapter(client)
     adapter.start_event_monitor()
     cursor = adapter.event_cursor()
     configured = adapter.configure(
@@ -576,7 +576,7 @@ def warm_rate_gate(recorder, first_sequence=1):
             recorder.on_telemetry(event)
 
 
-class SlowFakeCamera(FakeCameraAPI):
+class SlowFakeCamera(FakeAnyCamera):
     def file_info(self, recording_id):
         if self.active:
             raise RuntimeError("still recording")
@@ -623,7 +623,7 @@ controls:
             "recovery scan finds partial and phone recording ID",
             any(item["recording_id"] == "PHONE-ORPHAN" for item in recovered),
         )
-        camera = FakeCameraAPI()
+        camera = FakeAnyCamera()
         bridge = FakeDiscoveryBridge()
         recorder = EpisodeRecorder(
             store,
@@ -679,7 +679,7 @@ controls:
         check("phone file deleted after verification", camera.deleted == [camera.recording_id])
         check("partial directory is empty", not any(store.partial_dir.iterdir()))
 
-        rejected_camera = FakeCameraAPI(drops={"capture": 1})
+        rejected_camera = FakeAnyCamera(drops={"capture": 1})
         recorder.camera = rejected_camera
         await recorder.prepare_camera()
         warm_rate_gate(recorder, first_sequence=302)

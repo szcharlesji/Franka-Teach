@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from frankateach.recording.camera import CameraAPIAdapter
+from frankateach.recording.camera import AnyCameraAdapter
 from frankateach.recording.recorder import EpisodeRecorder
 from frankateach.recording.robot_client import RobotBridgeClient
 from frankateach.recording.storage import SessionStore
@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument("--session", required=True)
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--storage-root", default="~/data")
-    parser.add_argument("--camera-api-root", default="~/Camera-API")
+    parser.add_argument("--anycamera-root", default="~/Camera-API")
     parser.add_argument(
         "--camera-profile", default=str(REPO_ROOT / "configs" / "camera_recording.yaml")
     )
@@ -55,7 +55,7 @@ def main():
             tunnel = SSHTunnel(
                 args.ssh_host, args.bridge_local_port, args.bridge_remote_port
             ).start()
-        camera = CameraAPIAdapter.from_repo(args.camera_api_root, usbmux=True)
+        camera = AnyCameraAdapter.from_repo(args.anycamera_root, usbmux=True)
         bridge = RobotBridgeClient(
             f"http://127.0.0.1:{args.bridge_local_port}/ws", store.label
         )
@@ -65,7 +65,7 @@ def main():
             bridge,
             args.camera_profile,
             REPO_ROOT,
-            args.camera_api_root,
+            args.anycamera_root,
             default_duration=args.duration,
         )
         bridge.telemetry_callback = recorder.on_telemetry
@@ -78,7 +78,7 @@ def main():
                 await recorder.prepare_camera()
                 camera_health_task = asyncio.create_task(
                     recorder.camera_health_loop(),
-                    name="cameraapi-health",
+                    name="anycamera-health",
                 )
                 recorder.state = "idle"
                 recorder.message = (

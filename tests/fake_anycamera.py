@@ -1,4 +1,4 @@
-"""In-memory CameraAPI adapter for Discovery recorder tests."""
+"""In-memory AnyCamera adapter for Discovery recorder tests."""
 
 import time
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 from frankateach.recording.clock import camera_sample
 
 
-class FakeCameraAPI:
+class FakeAnyCamera:
     def __init__(self, payload=b"fake-mov-payload", drops=None, interrupted=False):
         self.payload = payload
         self.recording_id = "FAKE-RECORDING"

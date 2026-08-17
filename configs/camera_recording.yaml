@@ -1,4 +1,4 @@
-# Discovery-side CameraAPI capture profile. Fill in the three manual-control
+# Discovery-side AnyCamera capture profile. Fill in the three manual-control
 # blocks after mounting the phone and measuring the installed lighting.
 capture:
   camera: back

@@ -1,4 +1,4 @@
-"""Adapter around the standalone Camera-API Python client on Discovery."""
+"""Adapter around the standalone AnyCamera Python client on Discovery."""
 
 import importlib
 import inspect
@@ -12,8 +12,8 @@ from pathlib import Path
 from frankateach.recording.clock import camera_sample
 
 
-class CameraAPIAdapter:
-    """Normalize Camera-API client revisions to the HTTP contract in its docs."""
+class AnyCameraAdapter:
+    """Normalize AnyCamera client revisions to the HTTP contract in its docs."""
 
     def __init__(self, camera):
         self.camera = camera
@@ -28,13 +28,13 @@ class CameraAPIAdapter:
     @classmethod
     def from_repo(cls, repo_root, usbmux=True):
         client_dir = Path(repo_root).expanduser().resolve() / "client"
-        module_path = client_dir / "camera_api.py"
+        module_path = client_dir / "anycamera.py"
         if not module_path.is_file():
-            raise RuntimeError(f"CameraAPI client not found at {module_path}")
+            raise RuntimeError(f"AnyCamera client not found at {module_path}")
         if str(client_dir) not in sys.path:
             sys.path.insert(0, str(client_dir))
-        module = importlib.import_module("camera_api")
-        return cls(module.CameraAPI(usbmux=usbmux))
+        module = importlib.import_module("anycamera")
+        return cls(module.AnyCamera(usbmux=usbmux))
 
     @staticmethod
     def _unwrap(value):
@@ -50,7 +50,7 @@ class CameraAPIAdapter:
                     return part
                 if isinstance(part, (str, bytes, bytearray)):
                     try:
-                        return CameraAPIAdapter._unwrap(part)
+                        return AnyCameraAdapter._unwrap(part)
                     except Exception:
                         pass
         return value
@@ -60,7 +60,7 @@ class CameraAPIAdapter:
             method = getattr(self.camera, name, None)
             if callable(method):
                 return self._unwrap(method(*args, **kwargs))
-        raise AttributeError(f"CameraAPI client lacks {', '.join(names)}")
+        raise AttributeError(f"AnyCamera client lacks {', '.join(names)}")
 
     def _request(self, method, path, body=None, timeout=None):
         """Use the client's transport so usbmux remains an implementation detail."""
@@ -72,7 +72,7 @@ class CameraAPIAdapter:
                 break
         if request is None:
             raise RuntimeError(
-                f"CameraAPI client cannot call {method} {path}: "
+                f"AnyCamera client cannot call {method} {path}: "
                 "no public method or request transport"
             )
         signature = inspect.signature(request)
@@ -164,7 +164,7 @@ class CameraAPIAdapter:
             document = self.clock()
             after = time.perf_counter_ns()
             if not document.get("captureClockAvailable", False):
-                raise RuntimeError("CameraAPI capture synchronization clock is unavailable")
+                raise RuntimeError("AnyCamera capture synchronization clock is unavailable")
             remote = document.get("captureClockNanos")
             if remote is None:
                 remote = int(round(float(document["captureClockSeconds"]) * 1e9))
@@ -204,8 +204,14 @@ class CameraAPIAdapter:
             return self._request("GET", f"/files/{recording_id}")
 
     def files(self):
+        """The raw GET /files document; callers read freeDiskBytes from it.
+
+        Deliberately not list_recordings(): that returns only the "recordings"
+        array and drops freeDiskBytes, which is what the phone free-space gate
+        checks. storage() keeps it.
+        """
         try:
-            return self._public(("files", "list_files"))
+            return self._public(("files", "list_files", "storage"))
         except AttributeError:
             return self._request("GET", "/files")
 
@@ -239,7 +245,7 @@ class CameraAPIAdapter:
             data = cls._json_value(getattr(raw, "data", None))
             if event_type is not None:
                 return cls._normalize_event((event_type, data))
-            raise RuntimeError(f"unsupported CameraAPI event value: {type(raw).__name__}")
+            raise RuntimeError(f"unsupported AnyCamera event value: {type(raw).__name__}")
 
         document = dict(raw)
         if "data" in document and "payload" not in document:
@@ -251,7 +257,7 @@ class CameraAPIAdapter:
             document["payload"] = data
         event_type = document.get("type") or document.get("event")
         if not event_type:
-            raise RuntimeError("CameraAPI event is missing its type")
+            raise RuntimeError("AnyCamera event is missing its type")
         document["type"] = str(event_type)
         document.pop("event", None)
         document.setdefault("payload", {})
@@ -274,7 +280,7 @@ class CameraAPIAdapter:
                 else:
                     self._consume_events(source)
                 if not self._event_stop.wait(0.1):
-                    raise RuntimeError("CameraAPI event stream ended")
+                    raise RuntimeError("AnyCamera event stream ended")
             except Exception as exc:
                 with self._event_condition:
                     self._event_error = f"{type(exc).__name__}: {exc}"
@@ -303,7 +309,7 @@ class CameraAPIAdapter:
         """Start the persistent SSE reader and require its initial hello event."""
         if self._event_method() is None:
             raise RuntimeError(
-                "CameraAPI Python client has no SSE event iterator; expected one of "
+                "AnyCamera Python client has no SSE event iterator; expected one of "
                 "events(), iter_events(), event_stream(), or watch_events()"
             )
         with self._event_condition:
@@ -311,7 +317,7 @@ class CameraAPIAdapter:
                 self._event_stop.clear()
                 self._event_thread = threading.Thread(
                     target=self._event_worker,
-                    name="cameraapi-events",
+                    name="anycamera-events",
                     daemon=True,
                 )
                 self._event_thread.start()
@@ -320,7 +326,7 @@ class CameraAPIAdapter:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     detail = self._event_error or "no hello event received"
-                    raise RuntimeError(f"CameraAPI SSE stream is unavailable: {detail}")
+                    raise RuntimeError(f"AnyCamera SSE stream is unavailable: {detail}")
                 self._event_condition.wait(min(remaining, 0.1))
         return self.event_cursor()
 
@@ -360,7 +366,7 @@ class CameraAPIAdapter:
                 if remaining <= 0:
                     detail = f"; last SSE error: {self._event_error}" if self._event_error else ""
                     names = ", ".join(sorted(wanted))
-                    raise RuntimeError(f"CameraAPI event timeout waiting for {names}{detail}")
+                    raise RuntimeError(f"AnyCamera event timeout waiting for {names}{detail}")
                 self._event_condition.wait(min(remaining, 0.1))
 
     def wait_first_frame_event(self, recording_id, cursor, timeout=8.0):
@@ -404,13 +410,13 @@ class CameraAPIAdapter:
             except Exception as exc:
                 last_error = exc
             time.sleep(0.1)
-        raise RuntimeError(f"CameraAPI recording did not finalize: {last_error or 'timeout'}")
+        raise RuntimeError(f"AnyCamera recording did not finalize: {last_error or 'timeout'}")
 
     def download(self, recording_id, destination):
         destination = str(destination)
         method = getattr(self.camera, "download", None)
         if not callable(method):
-            raise RuntimeError("CameraAPI client has no resumable download() method")
+            raise RuntimeError("AnyCamera client has no resumable download() method")
         try:
             return method(recording_id, destination, resume=True)
         except TypeError:
@@ -425,7 +431,7 @@ class CameraAPIAdapter:
     def snapshot(self, max_width=640, quality=0.65):
         method = getattr(self.camera, "snapshot", None)
         if not callable(method):
-            raise RuntimeError("CameraAPI client has no snapshot() method")
+            raise RuntimeError("AnyCamera client has no snapshot() method")
         value = method(max_width=max_width, quality=quality)
         if isinstance(value, tuple):
             value = next(
@@ -436,6 +442,6 @@ class CameraAPIAdapter:
             value = bytes(value)
         if not isinstance(value, bytes):
             raise RuntimeError(
-                f"CameraAPI snapshot returned {type(value).__name__}, expected JPEG bytes"
+                f"AnyCamera snapshot returned {type(value).__name__}, expected JPEG bytes"
             )
         return value
