@@ -1,7 +1,7 @@
 control_hz: 50
 speed: 0.7
 inward_speed_scale: 0.3
-lateral_speed_scale: 0.3
+lateral_speed_scale: 0.6
 joint1_speed_fraction: 0.7
 lead_speed_gain: 9.35
 accel_time: 0.08
@@ -34,7 +34,7 @@ arms:
     half_extents:
     - 0.13659850702308124
     - 0.16239277808318503
-    plane_z: 0.29507192224264145
+    plane_z: 0.28
     fixed_quat:
     - 0.9998876662576567
       #- 0.014988491112082267
@@ -72,7 +72,7 @@ arms:
     half_extents:
     - 0.13240939193459272
     - 0.16028558872917492
-    plane_z: 0.29614218324422836
+    plane_z: 0.28
     fixed_quat:
     - 0.9999924352726303
     - -0.0038896526212930144
